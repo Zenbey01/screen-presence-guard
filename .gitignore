@@ -1,0 +1,9 @@
+/TIMEV2-2026-06-12-1520.zip
+
+# Build artifacts
+/dist/
+/ScreenPresenceGuard.zip
+
+# Personal face training data
+/face_model.yml
+/face_imgs.pkl

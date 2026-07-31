@@ -2,7 +2,11 @@
 
 # Build artifacts
 /dist/
+/build/
 /ScreenPresenceGuard.zip
+*.spec
+__pycache__/
+*.pyc
 
 # Personal face training data
 /face_model.yml

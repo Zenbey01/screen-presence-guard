@@ -19,6 +19,17 @@ pyinstaller `
 if (Test-Path "dist\ScreenPresenceGuard") {
     Write-Host "`nBuild OK! — dist\ScreenPresenceGuard\" -ForegroundColor Green
 
+    # Create installer bat
+    $bat = @'
+@echo off
+chcp 65001 >nul
+set "DIR=%~dp0"
+powershell -Command "$ws=New-Object -ComObject WScript.Shell;$lnk=$ws.CreateShortcut([Environment]::GetFolderPath('Desktop')+'\Screen Presence Guard.lnk');$lnk.TargetPath='%DIR%ScreenPresenceGuard.exe';$lnk.WorkingDirectory='%DIR%';$lnk.IconLocation='%DIR%icon.ico,0';$lnk.Save()"
+echo สร้าง Shortcut บน Desktop แล้ว!
+pause
+'@
+    [System.IO.File]::WriteAllText("$appDir\dist\ScreenPresenceGuard\ติดตั้ง shortcut.bat", $bat, [System.Text.Encoding]::UTF8)
+
     # Zip it
     $zip = Join-Path $appDir "ScreenPresenceGuard.zip"
     Remove-Item $zip -ErrorAction SilentlyContinue

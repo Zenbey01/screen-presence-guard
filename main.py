@@ -41,21 +41,23 @@ FACE_SIZE       = (100, 100)
 LBPH_THRESHOLD  = 90.0
 REG_SAMPLES     = 40
 
-# ── Color palette (VS-style: purple + white + green) ─────────────────────────
-C_BG      = "#f5f5f5"
-C_SIDEBAR = "#3c1f52"
-C_CARD    = "#ffffff"
-C_BANNER  = "#68217a"
-C_BORDER  = "#e0e0e0"
-C_TEXT1   = "#1e1e1e"
-C_TEXT2   = "#6d6d6d"
-C_TEXT3   = "#b0b0b0"
-C_ON      = "#107c10"
-C_WARN    = "#d87500"
-C_OFF     = "#c50500"
-C_DIM     = "#cccccc"
-C_ACCENT  = "#68217a"
-C_ACCENT2 = "#f0e6f5"
+# ── Color palette (dark navy / blue accent) ───────────────────────────────────
+C_BG      = "#090c15"   # outer bg / window
+C_PANEL   = "#0c0f1a"   # inner panel
+C_BAR     = "#0e1220"   # title/status bar
+C_CAM     = "#080b12"   # camera area
+C_CARD    = "#141928"   # chips / cards
+C_BORDER  = "#1e2840"   # borders
+C_ACCENT  = "#3b82f6"   # blue (action)
+C_ON      = "#22c55e"   # green (face on)
+C_WARN    = "#f59e0b"   # amber (countdown)
+C_OFF     = "#ef4444"   # red (screen off)
+C_TEXT1   = "#e1e7f5"   # main text
+C_TEXT2   = "#b0bbcc"   # secondary
+C_TEXT3   = "#8a96b0"   # muted
+C_DIM     = "#566083"   # dim
+C_VDIM    = "#3a4460"   # very dim
+C_BTN_RUN = "#1e2a1e"   # stop button bg
 FONT      = "Segoe UI"
 FONT_MONO = "Consolas"
 
@@ -138,8 +140,8 @@ class App(ctk.CTk):
         self.geometry("960x610")
         self.resizable(False, False)
         self.configure(fg_color=C_BG)
-        ctk.set_appearance_mode("light")
-        ctk.set_default_color_theme("green")
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
         _ico = os.path.join(_DIR, "icon.ico")
         if os.path.exists(_ico):
             self.iconbitmap(_ico)
@@ -205,311 +207,390 @@ class App(ctk.CTk):
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, minsize=60)
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_columnconfigure(2, minsize=284)
-        self._build_sidebar()
-        self._build_main()
-        self._build_right()
+        self._tab = "settings"
+        self._tab_frames = {}
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self._build_status_strip()
+        self._build_body()
 
-    # ── Sidebar ───────────────────────────────────────────────────────────────
+    # ── Status strip ──────────────────────────────────────────────────────────
 
-    def _build_sidebar(self):
-        sb = ctk.CTkFrame(self, fg_color=C_SIDEBAR, corner_radius=0, width=60,
-                           border_width=1, border_color=C_BORDER)
-        sb.grid(row=0, column=0, sticky="nsew")
-        sb.grid_propagate(False)
-        sb.grid_rowconfigure(2, weight=1)
-        sb.grid_columnconfigure(0, weight=1)
+    def _build_status_strip(self):
+        strip = ctk.CTkFrame(self, fg_color=C_BAR, corner_radius=0, height=72)
+        strip.grid(row=0, column=0, sticky="ew")
+        strip.grid_propagate(False)
+        strip.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(sb, text="" if self._icon_sm else "👤",
-                     image=self._icon_sm, font=ctk.CTkFont(size=22)).grid(
-            row=0, column=0, pady=(18, 4))
+        # Left: dot + labels
+        self.status_dot = ctk.CTkLabel(strip, text="⬤",
+                                        font=ctk.CTkFont(size=11),
+                                        text_color=C_DIM, width=22)
+        self.status_dot.grid(row=0, column=0, rowspan=2, padx=(20, 10), sticky="ns",
+                              pady=16)
 
-        self.sidebar_dot = ctk.CTkLabel(sb, text="⬤",
-                                         font=ctk.CTkFont(size=12),
-                                         text_color=C_DIM)
-        self.sidebar_dot.grid(row=1, column=0, pady=4)
-
-        ctk.CTkLabel(sb, text="", fg_color="transparent").grid(row=2, column=0)
-
-        ctk.CTkButton(sb, text="✕", width=36, height=36, corner_radius=8,
-                       fg_color="transparent", hover_color=C_CARD,
-                       text_color=C_TEXT3, font=ctk.CTkFont(size=14),
-                       command=self._close).grid(row=3, column=0, pady=(0, 16))
-
-    # ── Main panel ────────────────────────────────────────────────────────────
-
-    def _build_main(self):
-        main = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
-        main.grid(row=0, column=1, sticky="nsew")
-        main.grid_rowconfigure(1, weight=1)
-        main.grid_columnconfigure(0, weight=1)
-
-        # Welcome banner
-        banner = ctk.CTkFrame(main, corner_radius=0, fg_color=C_BANNER, height=82)
-        banner.grid(row=0, column=0, sticky="ew")
-        banner.grid_propagate(False)
-        banner.grid_columnconfigure(1, weight=1)
-
-        icon_box = ctk.CTkFrame(banner, width=50, height=50, corner_radius=12,
-                                  fg_color="#68217a")
-        icon_box.grid(row=0, column=0, padx=(16, 12), pady=16, sticky="w")
-        icon_box.grid_propagate(False)
-        ctk.CTkLabel(icon_box, text="" if self._icon_lg else "👤",
-                     image=self._icon_lg, fg_color="transparent").place(
-            relx=0.5, rely=0.5, anchor="center")
-
-        tx = ctk.CTkFrame(banner, fg_color="transparent")
-        tx.grid(row=0, column=1, sticky="w")
-        self.banner_title = ctk.CTkLabel(
-            tx, text="ยังไม่เริ่มทำงาน",
+        self.status_label = ctk.CTkLabel(
+            strip, text="ยังไม่เริ่มทำงาน",
             font=ctk.CTkFont(family=FONT, size=18, weight="bold"),
-            text_color="#ffffff", anchor="w"
+            text_color=C_DIM, anchor="w"
         )
-        self.banner_title.pack(anchor="w")
-        self.banner_sub = ctk.CTkLabel(
-            tx, text="กดปุ่ม Start เพื่อเริ่มตรวจจับใบหน้า",
-            font=ctk.CTkFont(family=FONT, size=11),
-            text_color="#e8d5f0", anchor="w"
-        )
-        self.banner_sub.pack(anchor="w")
+        self.status_label.grid(row=0, column=1, sticky="sw", pady=(14, 1))
 
-        self.banner_badge = ctk.CTkLabel(
-            banner, text="● Screen OFF",
-            font=ctk.CTkFont(family=FONT, size=11),
-            fg_color="#68217a", corner_radius=20,
-            text_color="#e8d5f0", width=110, height=28,
+        self.status_sub = ctk.CTkLabel(
+            strip, text="กดปุ่ม Start เพื่อเริ่มตรวจจับใบหน้า",
+            font=ctk.CTkFont(family=FONT, size=12),
+            text_color=C_VDIM, anchor="w"
         )
-        self.banner_badge.grid(row=0, column=2, padx=16)
+        self.status_sub.grid(row=1, column=1, sticky="nw", pady=(1, 14))
 
-        # Content area
-        content = ctk.CTkFrame(main, fg_color="transparent")
-        content.grid(row=1, column=0, sticky="nsew", padx=12, pady=10)
-        content.grid_rowconfigure(0, weight=1)
-        content.grid_columnconfigure(0, weight=1)
+        # Right: screen badge
+        badge = ctk.CTkFrame(strip, fg_color=C_CARD, corner_radius=20,
+                              border_width=1, border_color=C_BORDER)
+        badge.grid(row=0, column=2, rowspan=2, padx=(10, 20), sticky="ns",
+                   pady=20)
+        badge.grid_columnconfigure(1, weight=1)
+        self.screen_badge_dot = ctk.CTkLabel(badge, text="⬤",
+                                              font=ctk.CTkFont(size=8),
+                                              text_color=C_VDIM)
+        self.screen_badge_dot.grid(row=0, column=0, padx=(12, 5))
+        self.screen_badge_lbl = ctk.CTkLabel(badge, text="Screen OFF",
+                                              font=ctk.CTkFont(family=FONT, size=12),
+                                              text_color=C_DIM)
+        self.screen_badge_lbl.grid(row=0, column=1, padx=(0, 14))
+
+    # ── Body (left + right) ───────────────────────────────────────────────────
+
+    def _build_body(self):
+        body = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=0)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        self._build_left(body)
+        # vertical divider
+        ctk.CTkFrame(body, width=1, fg_color=C_BORDER, corner_radius=0).grid(
+            row=0, column=1, sticky="ns", padx=0, pady=16)
+        self._build_right(body)
+
+    def _build_left(self, parent):
+        left = ctk.CTkFrame(parent, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=16, pady=16)
+        left.grid_rowconfigure(0, weight=1)
+        left.grid_columnconfigure(0, weight=1)
 
         # Camera card
-        cam_card = ctk.CTkFrame(content, corner_radius=12, fg_color=C_CARD,
+        cam_card = ctk.CTkFrame(left, fg_color=C_CAM, corner_radius=10,
                                   border_width=1, border_color=C_BORDER)
-        cam_card.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        cam_card.grid(row=0, column=0, sticky="nsew", pady=(0, 12))
         cam_card.grid_rowconfigure(0, weight=1)
         cam_card.grid_columnconfigure(0, weight=1)
 
         self.cam_label = ctk.CTkLabel(
-            cam_card, text="กดปุ่ม Start เพื่อเริ่ม",
-            fg_color="#f0f0f0", corner_radius=8,
-            text_color=C_TEXT3, font=ctk.CTkFont(family=FONT, size=12)
+            cam_card, text="Camera Feed",
+            fg_color="transparent", corner_radius=8,
+            text_color=C_BORDER, font=ctk.CTkFont(family=FONT, size=11,
+                                                    weight="bold"),
         )
-        self.cam_label.grid(row=0, column=0, padx=8, pady=(8, 0), sticky="nsew")
+        self.cam_label.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
 
-        sr = ctk.CTkFrame(cam_card, fg_color="transparent")
-        sr.grid(row=1, column=0, padx=10, pady=(5, 8), sticky="ew")
-        sr.grid_columnconfigure(1, weight=1)
+        # Stat chips
+        chips = ctk.CTkFrame(left, fg_color="transparent")
+        chips.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        chips.grid_columnconfigure((0, 1, 2), weight=1)
 
-        self.dot = ctk.CTkLabel(sr, text="⬤", font=ctk.CTkFont(size=10),
-                                 text_color=C_DIM, width=14)
-        self.dot.grid(row=0, column=0, padx=(0, 6))
-        self.status_lbl = ctk.CTkLabel(
-            sr, text="ยังไม่เริ่มทำงาน",
-            font=ctk.CTkFont(family=FONT, size=12), text_color=C_TEXT2, anchor="w"
-        )
-        self.status_lbl.grid(row=0, column=1, sticky="w")
-        self.screen_lbl = ctk.CTkLabel(
-            sr, text="",
-            font=ctk.CTkFont(family=FONT, size=11, weight="bold"),
-            text_color=C_TEXT3, anchor="e"
-        )
-        self.screen_lbl.grid(row=0, column=2, padx=(8, 0))
+        self.face_stat   = self._chip(chips, 0, "Face Detection")
+        self.screen_stat = self._chip(chips, 1, "Display State")
+        self.time_stat   = self._chip(chips, 2, "นับถอยหลัง")
 
-        # Stat cards
-        stats = ctk.CTkFrame(content, fg_color="transparent")
-        stats.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        stats.grid_columnconfigure((0, 1, 2), weight=1)
-
-        self.face_stat  = self._stat_card(stats, 0, "👤", "Face Detection", C_ACCENT2, C_ACCENT)
-        self.screen_stat = self._stat_card(stats, 1, "🖥️", "Display State",  "#0d2a1a", C_ON)
-        self.time_stat  = self._stat_card(stats, 2, "⏱️", "ดับจอใน",        "#2a1a00", C_WARN)
-
-        # Action buttons
-        btns = ctk.CTkFrame(content, fg_color="transparent")
+        # Buttons
+        btns = ctk.CTkFrame(left, fg_color="transparent")
         btns.grid(row=2, column=0, sticky="ew")
         btns.grid_columnconfigure(0, weight=2)
         btns.grid_columnconfigure(1, weight=1)
 
         self.start_btn = ctk.CTkButton(
-            btns, text="▶   Start", height=42,
-            font=ctk.CTkFont(family=FONT, size=14, weight="bold"),
-            corner_radius=10, fg_color=C_ACCENT, hover_color="#521a63",
-            text_color="#ffffff", command=self._toggle
+            btns, text="▶  Start", height=44,
+            font=ctk.CTkFont(family=FONT, size=15, weight="bold"),
+            corner_radius=8, fg_color="#1a2540",
+            border_width=1, border_color="#2d4878",
+            hover_color="#1e2d4d", text_color=C_ACCENT,
+            command=self._toggle
         )
-        self.start_btn.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        self.start_btn.grid(row=0, column=0, padx=(0, 10), sticky="ew")
 
         ctk.CTkButton(
-            btns, text="⊟   Tray", height=42,
-            font=ctk.CTkFont(family=FONT, size=13),
-            corner_radius=10, fg_color=C_CARD, hover_color="#e8d5f0",
-            border_width=1, border_color=C_BORDER, text_color=C_TEXT3,
-            command=self._to_tray
+            btns, text="⊡  Tray", height=44,
+            font=ctk.CTkFont(family=FONT, size=14),
+            corner_radius=8, fg_color=C_CARD,
+            border_width=1, border_color=C_BORDER, text_color=C_DIM,
+            hover_color="#1a2035", command=self._to_tray
         ).grid(row=0, column=1, sticky="ew")
 
-    def _stat_card(self, parent, col, icon, label, icon_bg, icon_fg):
-        card = ctk.CTkFrame(parent, corner_radius=10, fg_color=C_CARD,
+    def _chip(self, parent, col, label):
+        card = ctk.CTkFrame(parent, corner_radius=8, fg_color=C_CARD,
                              border_width=1, border_color=C_BORDER)
-        card.grid(row=0, column=col, padx=(0, 8) if col < 2 else 0, sticky="ew")
+        card.grid(row=0, column=col, padx=(0, 10) if col < 2 else 0, sticky="ew")
+        ctk.CTkLabel(card, text=label,
+                      font=ctk.CTkFont(family=FONT, size=9),
+                      text_color=C_DIM, anchor="center").pack(pady=(13, 7))
+        val = ctk.CTkLabel(card, text="—",
+                            font=ctk.CTkFont(family=FONT, size=15, weight="bold"),
+                            text_color=C_DIM, anchor="center")
+        val.pack(pady=(0, 13))
+        return val
 
-        inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(padx=12, pady=10, fill="x")
+    # ── Right panel (tabbed) ──────────────────────────────────────────────────
 
-        icon_wrap = ctk.CTkFrame(inner, width=36, height=36, corner_radius=10,
-                                  fg_color=icon_bg)
-        icon_wrap.pack(side="left", padx=(0, 10))
-        icon_wrap.pack_propagate(False)
-        ctk.CTkLabel(icon_wrap, text=icon, font=ctk.CTkFont(size=16)).place(
-            relx=0.5, rely=0.5, anchor="center")
-
-        right = ctk.CTkFrame(inner, fg_color="transparent")
-        right.pack(side="left")
-
-        val_lbl = ctk.CTkLabel(right, text="—",
-                                font=ctk.CTkFont(family=FONT, size=14, weight="bold"),
-                                text_color=C_TEXT1, anchor="w")
-        val_lbl.pack(anchor="w")
-        ctk.CTkLabel(right, text=label,
-                      font=ctk.CTkFont(family=FONT, size=10),
-                      text_color=C_TEXT3, anchor="w").pack(anchor="w")
-        return val_lbl
-
-    # ── Right panel ───────────────────────────────────────────────────────────
-
-    def _build_right(self):
-        rp = ctk.CTkFrame(self, fg_color=C_SIDEBAR, corner_radius=0,
-                           border_width=1, border_color=C_BORDER)
-        rp.grid(row=0, column=2, sticky="nsew")
+    def _build_right(self, parent):
+        rp = ctk.CTkFrame(parent, fg_color="transparent", width=290)
+        rp.grid(row=0, column=2, sticky="nsew", padx=(0, 0))
+        rp.grid_propagate(False)
+        rp.grid_rowconfigure(1, weight=1)
         rp.grid_columnconfigure(0, weight=1)
 
-        # Face recognition
-        ctk.CTkLabel(rp, text="FACE RECOGNITION",
-                     font=ctk.CTkFont(family=FONT, size=9, weight="bold"),
-                     text_color=C_TEXT3, anchor="w").grid(
-            row=0, column=0, padx=14, pady=(14, 6), sticky="w")
+        # Tab bar
+        tab_bar = ctk.CTkFrame(rp, fg_color="transparent", height=44)
+        tab_bar.grid(row=0, column=0, sticky="ew")
+        tab_bar.grid_propagate(False)
+        ctk.CTkFrame(rp, height=1, fg_color=C_BORDER, corner_radius=0).grid(
+            row=0, column=0, sticky="sew")
 
-        face_card = ctk.CTkFrame(rp, corner_radius=10, fg_color=C_CARD,
-                                  border_width=1, border_color=C_BORDER)
-        face_card.grid(row=1, column=0, padx=12, sticky="ew")
-        face_card.grid_columnconfigure(0, weight=1)
+        self._tab_btns = {}
+        for i, (key, lbl) in enumerate([("settings", "ตั้งค่า"),
+                                          ("faces",    "ใบหน้า"),
+                                          ("log",      "บันทึก")]):
+            b = ctk.CTkButton(
+                tab_bar, text=lbl, width=94, height=44,
+                corner_radius=0, font=ctk.CTkFont(family=FONT, size=13),
+                fg_color="transparent", hover_color=C_CARD,
+                text_color=C_ACCENT if key == "settings" else C_DIM,
+                command=lambda k=key: self._switch_tab(k)
+            )
+            b.grid(row=0, column=i, sticky="nsew")
+            self._tab_btns[key] = b
 
-        self.face_lbl = ctk.CTkLabel(
-            face_card, text=self._face_status_text(),
-            font=ctk.CTkFont(family=FONT, size=11), text_color=C_TEXT2, anchor="w"
+        # Tab content area
+        content = ctk.CTkScrollableFrame(rp, fg_color="transparent",
+                                          scrollbar_button_color=C_BORDER,
+                                          scrollbar_button_hover_color=C_DIM)
+        content.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        content.grid_columnconfigure(0, weight=1)
+
+        # ── SETTINGS tab ──────────────────────────────────────────────────────
+        sf = ctk.CTkFrame(content, fg_color="transparent")
+        sf.grid(row=0, column=0, sticky="ew")
+        sf.grid_columnconfigure(0, weight=1)
+        self._tab_frames["settings"] = sf
+
+        self._add_slider_v(sf, 0, "ดับจอหลังจาก", self.timeout,  5, 120,
+                           lambda v: f"{int(v)}s")
+        self._add_slider_v(sf, 1, "ตรวจสอบทุก",   self.interval, 1, 10,
+                           lambda v: f"{v:.1f}s")
+
+        ctk.CTkFrame(sf, height=1, fg_color=C_BORDER).grid(
+            row=2, column=0, sticky="ew", pady=(4, 14))
+
+        # ปลุกจอด้วย
+        ctk.CTkLabel(sf, text="ปลุกจอด้วย",
+                     font=ctk.CTkFont(family=FONT, size=14),
+                     text_color=C_TEXT2, anchor="w").grid(
+            row=3, column=0, sticky="w", pady=(0, 16))
+
+        self._toggle_row(sf, 4, "เมาส์",    "ขยับเมาส์เพื่อปลุกจอ",    self.use_mouse)
+        self._toggle_row(sf, 5, "คีย์บอร์ด", "กดแป้นใดก็ได้เพื่อปลุก", self.use_keyboard)
+
+        ctk.CTkFrame(sf, height=1, fg_color=C_BORDER).grid(
+            row=6, column=0, sticky="ew", pady=(14, 14))
+
+        # ขยับเมาส์วิ่งกลม
+        hdr = ctk.CTkFrame(sf, fg_color="transparent")
+        hdr.grid(row=7, column=0, sticky="ew", pady=(0, 4))
+        hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(hdr, text="ขยับเมาส์วิ่งกลม",
+                     font=ctk.CTkFont(family=FONT, size=14),
+                     text_color=C_TEXT2, anchor="w").grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(sf, text="ป้องกันจอดับด้วยการขยับเมาส์เป็นวงกลมอัตโนมัติ",
+                     font=ctk.CTkFont(family=FONT, size=11),
+                     text_color=C_VDIM, anchor="w").grid(
+            row=8, column=0, sticky="w", pady=(0, 14))
+
+        # จอเปิด card
+        self._circle_card(sf, 9, "จอเปิด", C_ON, self.jiggle_on,
+                          self.jiggle_on_sec, "on")
+
+        # ── FACES tab ──────────────────────────────────────────────────────────
+        ff = ctk.CTkFrame(content, fg_color="transparent")
+        ff.grid(row=0, column=0, sticky="ew")
+        ff.grid_columnconfigure(0, weight=1)
+        ff.grid_remove()
+        self._tab_frames["faces"] = ff
+
+        # Face count card
+        fc_card = ctk.CTkFrame(ff, fg_color=C_CARD, corner_radius=10,
+                                border_width=1, border_color=C_BORDER)
+        fc_card.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        fc_card.grid_columnconfigure(1, weight=1)
+
+        icon_wrap = ctk.CTkFrame(fc_card, width=46, height=46, corner_radius=23,
+                                  fg_color="#0d1e38")
+        icon_wrap.grid(row=0, column=0, padx=(18, 14), pady=18)
+        icon_wrap.grid_propagate(False)
+        ctk.CTkLabel(icon_wrap, text="👤", font=ctk.CTkFont(size=20)).place(
+            relx=0.5, rely=0.5, anchor="center")
+
+        fc_txt = ctk.CTkFrame(fc_card, fg_color="transparent")
+        fc_txt.grid(row=0, column=1, sticky="w")
+        self.face_count_lbl = ctk.CTkLabel(
+            fc_txt, text=str(self._known_count),
+            font=ctk.CTkFont(family=FONT, size=28, weight="bold"),
+            text_color=C_TEXT1
         )
-        self.face_lbl.grid(row=0, column=0, padx=12, pady=(10, 6), sticky="w")
+        self.face_count_lbl.pack(anchor="w")
+        ctk.CTkLabel(fc_txt, text="ตัวอย่างที่ลงทะเบียน",
+                      font=ctk.CTkFont(family=FONT, size=12),
+                      text_color=C_DIM).pack(anchor="w")
 
         self.reg_btn = ctk.CTkButton(
-            face_card, text="+ ลงทะเบียนหน้า", height=32,
-            font=ctk.CTkFont(family=FONT, size=12), corner_radius=8,
-            fg_color=C_ACCENT2, hover_color="#521a63",
-            border_width=1, border_color=C_ACCENT, text_color="#e8d5f0",
+            ff, text="+ ลงทะเบียนใบหน้าใหม่", height=44,
+            font=ctk.CTkFont(family=FONT, size=14, weight="bold"),
+            corner_radius=8, fg_color="#1a2540",
+            border_width=1, border_color="#2d4878",
+            hover_color="#1e2d4d", text_color=C_ACCENT,
             command=self._start_register,
             state="normal" if _HAS_LBPH else "disabled",
         )
-        self.reg_btn.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
+        self.reg_btn.grid(row=1, column=0, sticky="ew", pady=(0, 10))
 
         ctk.CTkButton(
-            face_card, text="✕ ล้างข้อมูล", height=28,
-            font=ctk.CTkFont(family=FONT, size=11), corner_radius=8,
-            fg_color="transparent", hover_color=C_BG,
-            border_width=1, border_color=C_BORDER, text_color=C_TEXT3,
+            ff, text="× ล้างข้อมูลทั้งหมด", height=40,
+            font=ctk.CTkFont(family=FONT, size=13),
+            corner_radius=8, fg_color="transparent",
+            border_width=1, border_color="#3d1515",
+            hover_color="#1a0a0a", text_color="#6b2020",
             command=self._clear_face_data,
-        ).grid(row=2, column=0, padx=12, pady=(0, 12), sticky="ew")
+        ).grid(row=2, column=0, sticky="ew")
 
-        # Divider
-        ctk.CTkFrame(rp, height=1, fg_color=C_BORDER).grid(
-            row=2, column=0, padx=12, pady=10, sticky="ew")
-
-        # Settings
-        ctk.CTkLabel(rp, text="SETTINGS",
-                     font=ctk.CTkFont(family=FONT, size=9, weight="bold"),
-                     text_color=C_TEXT3, anchor="w").grid(
-            row=3, column=0, padx=14, pady=(0, 8), sticky="w")
-
-        sf = ctk.CTkFrame(rp, fg_color="transparent")
-        sf.grid(row=4, column=0, padx=12, sticky="ew")
-        sf.grid_columnconfigure(1, weight=1)
-        self._add_slider(sf, 0, "ดับจอหลังจาก", self.timeout,  5, 120,
-                         lambda v: f"{int(v)}s")
-        self._add_slider(sf, 1, "ตรวจสอบทุก",   self.interval, 1, 10,
-                         lambda v: f"{v:.1f}s")
-
-        # ── ปลุกจอด้วย ──────────────────────────────────────────────────────────
-        ctk.CTkLabel(sf, text="ปลุกจอด้วย",
-                     font=ctk.CTkFont(family=FONT, size=11),
-                     text_color=C_TEXT2, anchor="w").grid(
-            row=2, column=0, padx=(0, 8), pady=(10, 2), sticky="w")
-
-        tog_row = ctk.CTkFrame(sf, fg_color="transparent")
-        tog_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 4))
-        self._make_switch(tog_row, "เมาส์",     self.use_mouse,    pack_side="left", padx=(0,16))
-        self._make_switch(tog_row, "คีย์บอร์ด", self.use_keyboard, pack_side="left")
-
-        # ── ขยับเมาส์วงกลม ──────────────────────────────────────────────────────
-        ctk.CTkLabel(sf, text="ขยับเมาส์วงกลม",
-                     font=ctk.CTkFont(family=FONT, size=11),
-                     text_color=C_TEXT2, anchor="w").grid(
-            row=4, column=0, padx=(0, 8), pady=(10, 2), sticky="w")
-
-        # จอเปิด row
-        jon_row = ctk.CTkFrame(sf, fg_color="transparent")
-        jon_row.grid(row=5, column=0, columnspan=3, sticky="ew")
-        jon_row.grid_columnconfigure(2, weight=1)
-        self._make_switch(jon_row, "จอเปิด", self.jiggle_on,
-                          command=lambda: self._on_jiggle_toggle("on"),
-                          pack_side=None, grid=(0,0))
-        ctk.CTkLabel(jon_row, text="ทุก", font=ctk.CTkFont(family=FONT, size=10),
-                     text_color=C_TEXT3).grid(row=0, column=1, padx=(10,4))
-        self._inline_slider(jon_row, self.jiggle_on_sec, 10, 300,
-                            lambda v: f"{int(v)}s", col=2)
-
-        # จอดำ row
-        joff_row = ctk.CTkFrame(sf, fg_color="transparent")
-        joff_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(4,0))
-        joff_row.grid_columnconfigure(2, weight=1)
-        self._make_switch(joff_row, "จอดำ ", self.jiggle_off,
-                          command=lambda: self._on_jiggle_toggle("off"),
-                          pack_side=None, grid=(0,0))
-        ctk.CTkLabel(joff_row, text="ทุก", font=ctk.CTkFont(family=FONT, size=10),
-                     text_color=C_TEXT3).grid(row=0, column=1, padx=(10,4))
-        self._inline_slider(joff_row, self.jiggle_off_sec, 10, 300,
-                            lambda v: f"{int(v)}s", col=2)
-
-        # Divider
-        ctk.CTkFrame(rp, height=1, fg_color=C_BORDER).grid(
-            row=5, column=0, padx=12, pady=10, sticky="ew")
-
-        # Log
-        ctk.CTkLabel(rp, text="LOG",
-                     font=ctk.CTkFont(family=FONT, size=9, weight="bold"),
-                     text_color=C_TEXT3, anchor="w").grid(
-            row=6, column=0, padx=14, pady=(0, 4), sticky="w")
-
-        log_wrap = ctk.CTkFrame(rp, corner_radius=8, fg_color=C_BG,
-                                  border_width=1, border_color=C_BORDER)
-        log_wrap.grid(row=7, column=0, padx=12, pady=(0, 10), sticky="nsew")
-        log_wrap.grid_columnconfigure(0, weight=1)
-        rp.grid_rowconfigure(7, weight=1)
+        # ── LOG tab ────────────────────────────────────────────────────────────
+        lf = ctk.CTkFrame(content, fg_color="transparent")
+        lf.grid(row=0, column=0, sticky="nsew")
+        lf.grid_columnconfigure(0, weight=1)
+        lf.grid_rowconfigure(0, weight=1)
+        lf.grid_remove()
+        self._tab_frames["log"] = lf
 
         self.log_box = ctk.CTkTextbox(
-            log_wrap, height=130,
-            font=ctk.CTkFont(family=FONT_MONO, size=9),
-            fg_color="transparent", border_width=0, text_color="#3d4966"
+            lf, fg_color=C_CARD, corner_radius=8, border_width=0,
+            font=ctk.CTkFont(family=FONT_MONO, size=10),
+            text_color=C_DIM
         )
-        self.log_box.pack(padx=4, pady=4, fill="both", expand=True)
+        self.log_box.grid(row=0, column=0, sticky="nsew")
         self.log_box.configure(state="disabled")
+
+    def _switch_tab(self, key: str):
+        self._tab = key
+        for k, frame in self._tab_frames.items():
+            if k == key:
+                frame.grid()
+            else:
+                frame.grid_remove()
+        for k, btn in self._tab_btns.items():
+            btn.configure(text_color=C_ACCENT if k == key else C_DIM)
+
+    def _add_slider_v(self, parent, row, label, var, lo, hi, fmt):
+        """Vertical slider block matching prototype."""
+        blk = ctk.CTkFrame(parent, fg_color="transparent")
+        blk.grid(row=row, column=0, sticky="ew", pady=(0, 22))
+        blk.grid_columnconfigure(0, weight=1)
+
+        top = ctk.CTkFrame(blk, fg_color="transparent")
+        top.pack(fill="x")
+        ctk.CTkLabel(top, text=label,
+                      font=ctk.CTkFont(family=FONT, size=14),
+                      text_color=C_TEXT2).pack(side="left")
+        val = ctk.CTkLabel(top, text=fmt(var.get()),
+                            font=ctk.CTkFont(family=FONT, size=17, weight="bold"),
+                            text_color=C_ACCENT)
+        val.pack(side="right")
+        ctk.CTkSlider(blk, from_=lo, to=hi, variable=var,
+                       fg_color=C_CARD, progress_color=C_ACCENT,
+                       button_color=C_ACCENT, button_hover_color="#60a5fa",
+                       height=14).pack(fill="x", pady=(10, 4))
+        rng = ctk.CTkFrame(blk, fg_color="transparent")
+        rng.pack(fill="x")
+        ctk.CTkLabel(rng, text=f"{lo}s",
+                      font=ctk.CTkFont(family=FONT, size=11),
+                      text_color=C_VDIM).pack(side="left")
+        ctk.CTkLabel(rng, text=f"{hi}s",
+                      font=ctk.CTkFont(family=FONT, size=11),
+                      text_color=C_VDIM).pack(side="right")
+        var.trace_add("write", lambda *_: val.configure(text=fmt(var.get())))
+
+    def _toggle_row(self, parent, row, title, subtitle, var):
+        """Toggle row with label + subtitle + switch."""
+        row_f = ctk.CTkFrame(parent, fg_color="transparent")
+        row_f.grid(row=row, column=0, sticky="ew", pady=(0, 16))
+        row_f.grid_columnconfigure(0, weight=1)
+
+        txt = ctk.CTkFrame(row_f, fg_color="transparent")
+        txt.pack(side="left", fill="both", expand=True)
+        ctk.CTkLabel(txt, text=title,
+                      font=ctk.CTkFont(family=FONT, size=14),
+                      text_color=C_TEXT3, anchor="w").pack(anchor="w")
+        ctk.CTkLabel(txt, text=subtitle,
+                      font=ctk.CTkFont(family=FONT, size=11),
+                      text_color=C_VDIM, anchor="w").pack(anchor="w")
+
+        sw = ctk.CTkSwitch(row_f, text="", variable=var,
+                            fg_color=C_CARD, progress_color=C_ACCENT,
+                            button_color="#dde5f5", button_hover_color="#ffffff",
+                            width=40, height=20)
+        sw.pack(side="right")
+
+    def _circle_card(self, parent, row, title, dot_color, var, delay_var, which):
+        """Compact card for circle jiggle setting."""
+        card = ctk.CTkFrame(parent, fg_color=C_CARD, corner_radius=8,
+                             border_width=1, border_color=C_BORDER)
+        card.grid(row=row, column=0, sticky="ew")
+        card.grid_columnconfigure(0, weight=1)
+
+        hdr = ctk.CTkFrame(card, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 0))
+        hdr.grid_columnconfigure(0, weight=1)
+
+        left = ctk.CTkFrame(hdr, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(left, text="⬤",
+                      font=ctk.CTkFont(size=8), text_color=dot_color).pack(
+            side="left", padx=(0, 6))
+        ctk.CTkLabel(left, text=title,
+                      font=ctk.CTkFont(family=FONT, size=13),
+                      text_color=C_TEXT3).pack(side="left")
+        ctk.CTkLabel(left, text="— หลังจาก",
+                      font=ctk.CTkFont(family=FONT, size=11),
+                      text_color=C_VDIM).pack(side="left", padx=(6, 0))
+
+        right = ctk.CTkFrame(hdr, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="e")
+        val_lbl = ctk.CTkLabel(right, text=f"{delay_var.get()}s",
+                                font=ctk.CTkFont(family=FONT, size=15, weight="bold"),
+                                text_color=C_ACCENT)
+        val_lbl.pack(side="left", padx=(0, 8))
+        delay_var.trace_add("write",
+            lambda *_: val_lbl.configure(text=f"{delay_var.get()}s"))
+        ctk.CTkSwitch(right, text="", variable=var,
+                       fg_color=C_BORDER, progress_color=C_ACCENT,
+                       button_color="#dde5f5", button_hover_color="#ffffff",
+                       width=40, height=20,
+                       command=lambda: self._on_jiggle_toggle(which)).pack(side="left")
+
+        sl = ctk.CTkSlider(card, from_=10, to=300, variable=delay_var,
+                            fg_color=C_PANEL, progress_color=C_ACCENT,
+                            button_color=C_ACCENT, button_hover_color="#60a5fa",
+                            height=12)
+        sl.grid(row=1, column=0, sticky="ew", padx=12, pady=(10, 12))
 
     def _add_slider(self, parent, row, label, var, lo, hi, fmt):
         ctk.CTkLabel(parent, text=label, font=ctk.CTkFont(family=FONT, size=11),
-                     text_color=C_TEXT2, anchor="w").grid(
+                     text_color="#ddd0e0", anchor="w").grid(
             row=row, column=0, padx=(0, 8), pady=4, sticky="w")
         ctk.CTkSlider(parent, from_=lo, to=hi, variable=var,
                       fg_color="#e0d0e8", progress_color=C_ACCENT,
@@ -526,7 +607,7 @@ class App(ctk.CTk):
                      padx=(0, 0), grid=None):
         sw = ctk.CTkSwitch(
             parent, text=text, variable=var,
-            font=ctk.CTkFont(family=FONT, size=11), text_color=C_TEXT1,
+            font=ctk.CTkFont(family=FONT, size=11), text_color="#ddd0e0",
             fg_color="#e0d0e8", progress_color=C_ACCENT,
             button_color="#c8d0e0", button_hover_color="#ffffff",
             width=40, height=20, command=command,
@@ -562,7 +643,7 @@ class App(ctk.CTk):
         tip = " (เพิ่มตัวอย่างเดิม)" if self._known_count else ""
         self._log(f"ลงทะเบียนหน้า{tip}... หันหน้าตรง ขยับเล็กน้อย")
         self.reg_btn.configure(text="กำลังจับหน้า...", state="disabled",
-                                text_color="#f9a825", border_color="#7a4400")
+                                text_color=C_WARN)
 
     def _bg_register(self, frame):
         try:
@@ -601,9 +682,9 @@ class App(ctk.CTk):
         self._reg_mode    = False
         self._reg_buffer  = []
         self._log(f"ลงทะเบียนสำเร็จ! รวม {self._known_count} ตัวอย่าง")
-        self.reg_btn.configure(text="+ ลงทะเบียนหน้า", state="normal",
-                                text_color="#e8d5f0", border_color=C_ACCENT)
-        self.face_lbl.configure(text=self._face_status_text())
+        self.reg_btn.configure(text="+ ลงทะเบียนใบหน้าใหม่", state="normal",
+                                text_color=C_ACCENT)
+        self.face_count_lbl.configure(text=str(self._known_count))
 
     def _clear_face_data(self):
         self._recognizer  = None
@@ -611,7 +692,7 @@ class App(ctk.CTk):
         for f in (FACE_MODEL_FILE, FACE_IMGS_FILE):
             if os.path.exists(f):
                 os.remove(f)
-        self.face_lbl.configure(text=self._face_status_text())
+        self.face_count_lbl.configure(text="0")
         self._log("ล้างข้อมูลหน้าแล้ว")
 
     # ── Start / Stop ──────────────────────────────────────────────────────────
@@ -633,15 +714,16 @@ class App(ctk.CTk):
         self._reg_mode   = False
         self._mouse_pos  = _cursor_pos()
         self.start_btn.configure(
-            text="⏹   Stop", fg_color="#c50500",
-            hover_color="#9a0400", text_color="#ffffff"
+            text="■  Stop", fg_color=C_BTN_RUN,
+            border_color="#2d5e2d", hover_color="#243324", text_color=C_ON
         )
         det = "MediaPipe" if _HAS_MP else "Haar"
         rec = f"LBPH ({self._known_count} ตย.)" if self._recognizer else "any-face"
-        self.banner_title.configure(text="กำลังทำงาน")
-        self.banner_sub.configure(text=f"{det} · {rec} · ตรวจสอบทุก {self.interval.get():.1f}s")
-        self.banner_badge.configure(text="● Screen ON", text_color="#ffffff", fg_color="#107c10")
-        self.sidebar_dot.configure(text_color=C_ON)
+        self.status_dot.configure(text_color=C_ON)
+        self.status_label.configure(text="ตรวจพบใบหน้า", text_color=C_ON)
+        self.status_sub.configure(text=f"กำลังตรวจจับ — {det} · {rec}")
+        self.screen_badge_dot.configure(text_color=C_ON)
+        self.screen_badge_lbl.configure(text="Screen ON", text_color=C_ON)
         self._log(f"เริ่มทำงาน — {det} + {rec}")
         if self.jiggle_on.get():
             self._sched_on()
@@ -687,23 +769,21 @@ class App(ctk.CTk):
             self.cap.release()
             self.cap = None
         self.start_btn.configure(
-            text="▶   Start", fg_color=C_ACCENT,
-            hover_color="#521a63", text_color="#ffffff"
+            text="▶  Start", fg_color="#1a2540",
+            border_color="#2d4878", hover_color="#1e2d4d", text_color=C_ACCENT
         )
-        self.dot.configure(text_color=C_DIM)
-        self.status_lbl.configure(text="หยุดทำงาน", text_color=C_TEXT2)
-        self.screen_lbl.configure(text="")
-        self.face_stat.configure(text="—")
-        self.screen_stat.configure(text="—")
-        self.time_stat.configure(text="—")
-        self.cam_label.configure(image=None, text="กดปุ่ม Start เพื่อเริ่ม")
-        self.banner_title.configure(text="ยังไม่เริ่มทำงาน")
-        self.banner_sub.configure(text="กดปุ่ม Start เพื่อเริ่มตรวจจับใบหน้า")
-        self.banner_badge.configure(text="● Screen OFF", text_color="#e8d5f0", fg_color="#68217a")
-        self.sidebar_dot.configure(text_color=C_DIM)
-        self.reg_btn.configure(text="+ ลงทะเบียนหน้า",
+        self.status_dot.configure(text_color=C_DIM)
+        self.status_label.configure(text="ยังไม่เริ่มทำงาน", text_color=C_DIM)
+        self.status_sub.configure(text="กดปุ่ม Start เพื่อเริ่มตรวจจับใบหน้า")
+        self.face_stat.configure(text="—", text_color=C_DIM)
+        self.screen_stat.configure(text="—", text_color=C_DIM)
+        self.time_stat.configure(text="—", text_color=C_DIM)
+        self.cam_label.configure(image=None, text="Camera Feed")
+        self.screen_badge_dot.configure(text_color=C_VDIM)
+        self.screen_badge_lbl.configure(text="Screen OFF", text_color=C_DIM)
+        self.reg_btn.configure(text="+ ลงทะเบียนใบหน้าใหม่",
                                 state="normal" if _HAS_LBPH else "disabled",
-                                text_color="#e8d5f0", border_color=C_ACCENT)
+                                text_color=C_ACCENT)
         self._log("หยุดทำงาน")
 
     # ── Tick ──────────────────────────────────────────────────────────────────
@@ -778,23 +858,21 @@ class App(ctk.CTk):
                 ctypes.windll.kernel32.SetThreadExecutionState(
                     ES_CONTINUOUS | ES_DISPLAY_REQUIRED)
             label = "พบใบหน้า" if face_detected else "พบการเคลื่อนไหว"
-            self.dot.configure(text_color=C_ON)
-            self.status_lbl.configure(text=label, text_color=C_TEXT1)
-            self.screen_lbl.configure(text="Screen ON", text_color=C_ON)
-            self.face_stat.configure(text="พบหน้า" if face_detected else "เมาส์")
-            self.screen_stat.configure(text="ON", text_color=C_ON)
-            self.time_stat.configure(text="—", text_color=C_TEXT3)
-            self.sidebar_dot.configure(text_color=C_ON)
+            self.status_dot.configure(text_color=C_ON)
+            self.status_label.configure(text=label, text_color=C_ON)
+            self.status_sub.configure(text="กำลังตรวจจับ — จอเปิดอยู่")
+            self.face_stat.configure(text="ตรวจพบ", text_color=C_ON)
+            self.screen_stat.configure(text="จอเปิด", text_color=C_ON)
+            self.time_stat.configure(text="—", text_color=C_DIM)
         else:
             absent    = time.time() - self.last_seen
             remaining = self.timeout.get() - absent
             if remaining > 0:
-                self.dot.configure(text_color=C_WARN)
-                self.status_lbl.configure(text="ไม่พบใบหน้า", text_color=C_TEXT2)
-                self.screen_lbl.configure(text=f"ดับใน {int(remaining)}s", text_color=C_WARN)
-                self.face_stat.configure(text="ไม่พบ", text_color=C_TEXT2)
+                self.status_dot.configure(text_color=C_WARN)
+                self.status_label.configure(text="ไม่พบใบหน้า", text_color=C_WARN)
+                self.status_sub.configure(text=f"ดับจอใน {int(remaining)} วินาที")
+                self.face_stat.configure(text="ไม่พบ", text_color=C_OFF)
                 self.time_stat.configure(text=f"{int(remaining)}s", text_color=C_WARN)
-                self.sidebar_dot.configure(text_color=C_WARN)
             elif not self.screen_off:
                 self._sleep()
             else:
@@ -813,14 +891,14 @@ class App(ctk.CTk):
         self.screen_off = True
         self._heartbeat = 0
         self._overlay   = _BlackOverlay(self)
-        self.dot.configure(text_color=C_OFF)
-        self.status_lbl.configure(text="ไม่พบใบหน้า", text_color=C_TEXT2)
-        self.screen_lbl.configure(text="Screen OFF", text_color=C_OFF)
-        self.face_stat.configure(text="ไม่พบ", text_color=C_TEXT2)
-        self.screen_stat.configure(text="OFF", text_color=C_OFF)
-        self.time_stat.configure(text="จอมืด", text_color=C_OFF)
-        self.banner_badge.configure(text="● Screen OFF", text_color="#ffffff", fg_color="#c50500")
-        self.sidebar_dot.configure(text_color=C_OFF)
+        self.status_dot.configure(text_color=C_OFF)
+        self.status_label.configure(text="จอดับแล้ว", text_color=C_OFF)
+        self.status_sub.configure(text="จอถูกดับ — รอตรวจพบใบหน้า")
+        self.face_stat.configure(text="ไม่พบ", text_color=C_OFF)
+        self.screen_stat.configure(text="จอดับ", text_color=C_OFF)
+        self.time_stat.configure(text="0s", text_color=C_OFF)
+        self.screen_badge_dot.configure(text_color=C_OFF)
+        self.screen_badge_lbl.configure(text="Screen OFF", text_color=C_OFF)
         self._log("จอมืด — กล้องยังทำงาน ไม่มี lock")
 
     # ── Mouse circle jiggle ───────────────────────────────────────────────────
@@ -930,8 +1008,8 @@ class App(ctk.CTk):
         self._mouse_pos = _cursor_pos()
         self.screen_off = False
         self._heartbeat = 0
-        self.banner_badge.configure(text="● Screen ON", text_color="#ffffff", fg_color="#107c10")
-        self.sidebar_dot.configure(text_color=C_ON)
+        self.screen_badge_dot.configure(text_color=C_ON)
+        self.screen_badge_lbl.configure(text="Screen ON", text_color=C_ON)
         self._log(f"เปิดจอ (trigger: {trigger})")
 
     # ── Tray ──────────────────────────────────────────────────────────────────

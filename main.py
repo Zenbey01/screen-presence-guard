@@ -14,16 +14,6 @@ from PIL import Image, ImageDraw
 import pystray
 from pystray import MenuItem as item
 
-try:
-    import mediapipe as mp
-    _mp_detect = mp.solutions.face_detection.FaceDetection(
-        model_selection=0, min_detection_confidence=0.5
-    )
-    _mp_lock = threading.Lock()
-    _HAS_MP = True
-except Exception:
-    _HAS_MP = False
-
 _HAS_LBPH = hasattr(cv2, "face")
 
 _cascade = cv2.CascadeClassifier(
@@ -40,6 +30,28 @@ FACE_IMGS_FILE  = os.path.join(_DIR, "face_imgs.pkl")
 FACE_SIZE       = (100, 100)
 LBPH_THRESHOLD  = 90.0
 REG_SAMPLES     = 40
+MP_MODEL_FILE   = os.path.join(_DIR, "blaze_face_short_range.tflite")
+
+# MediaPipe drives every presence decision. Haar cascade below is preview-only
+# fallback: too many false negatives (glasses, tilted head) to dim the screen on.
+try:
+    import mediapipe as mp
+    from mediapipe.tasks.python import vision as _mp_vision
+    from mediapipe.tasks.python.core.base_options import BaseOptions as _MPBaseOptions
+
+    _mp_detect = _mp_vision.FaceDetector.create_from_options(
+        _mp_vision.FaceDetectorOptions(
+            base_options=_MPBaseOptions(model_asset_path=MP_MODEL_FILE),
+            running_mode=_mp_vision.RunningMode.IMAGE,
+            min_detection_confidence=0.5,
+        )
+    )
+    _mp_lock = threading.Lock()
+    _HAS_MP  = True
+    _MP_ERR  = ""
+except Exception as e:
+    _HAS_MP = False
+    _MP_ERR = f"{type(e).__name__}: {e}"   # surfaced in _start(), never silent
 
 # ── Color palette (dark navy / blue accent) ───────────────────────────────────
 C_BG      = "#090c15"   # outer bg / window
@@ -86,18 +98,12 @@ def _cursor_pos() -> tuple[int, int]:
 def _detect_boxes(frame) -> list:
     if _HAS_MP:
         with _mp_lock:
-            rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = _mp_detect.process(rgb)
-        boxes = []
-        if results.detections:
-            h, w = frame.shape[:2]
-            for det in results.detections:
-                bb = det.location_data.relative_bounding_box
-                boxes.append((
-                    max(0, int(bb.xmin * w)), max(0, int(bb.ymin * h)),
-                    int(bb.width * w), int(bb.height * h),
-                ))
-        return boxes
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            res = _mp_detect.detect(
+                mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
+        return [(max(0, d.bounding_box.origin_x), max(0, d.bounding_box.origin_y),
+                 d.bounding_box.width, d.bounding_box.height)
+                for d in res.detections]
     gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     faces = _cascade.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
     return faces.tolist() if len(faces) > 0 else []
@@ -174,10 +180,6 @@ class App(ctk.CTk):
         self._jiggle_off_id   = None
 
         self._load_face_data()
-        _ico_path = os.path.join(_DIR, "icon.ico")
-        _pil_icon = Image.open(_ico_path) if os.path.exists(_ico_path) else None
-        self._icon_lg = ctk.CTkImage(_pil_icon, size=(38, 38)) if _pil_icon else None
-        self._icon_sm = ctk.CTkImage(_pil_icon, size=(26, 26)) if _pil_icon else None
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._close)
 
@@ -207,7 +209,6 @@ class App(ctk.CTk):
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self._tab = "settings"
         self._tab_frames = {}
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -486,7 +487,6 @@ class App(ctk.CTk):
         self.log_box.configure(state="disabled")
 
     def _switch_tab(self, key: str):
-        self._tab = key
         for k, frame in self._tab_frames.items():
             if k == key:
                 frame.grid()
@@ -637,16 +637,29 @@ class App(ctk.CTk):
             self._log("กด Start ก่อน แล้วค่อยลงทะเบียน")
             return
         if self._reg_mode:
+            self._cancel_register()
             return
         self._reg_mode   = True
         self._reg_buffer = []
         tip = " (เพิ่มตัวอย่างเดิม)" if self._known_count else ""
         self._log(f"ลงทะเบียนหน้า{tip}... หันหน้าตรง ขยับเล็กน้อย")
-        self.reg_btn.configure(text="กำลังจับหน้า...", state="disabled",
-                                text_color=C_WARN)
+        self.reg_btn.configure(text="×  ยกเลิกการลงทะเบียน", text_color=C_WARN)
+
+    def _cancel_register(self):
+        self._reg_mode   = False
+        self._reg_buffer = []
+        self._reset_reg_btn()
+        self._log("ยกเลิกการลงทะเบียน")
+
+    def _reset_reg_btn(self):
+        self.reg_btn.configure(text="+ ลงทะเบียนใบหน้าใหม่",
+                                state="normal" if _HAS_LBPH else "disabled",
+                                text_color=C_ACCENT)
 
     def _bg_register(self, frame):
         try:
+            if not self._reg_mode:      # cancelled while this thread was queued
+                return
             boxes = _detect_boxes(frame)
             if boxes:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -666,6 +679,8 @@ class App(ctk.CTk):
             self._bg_busy = False
 
     def _finish_register(self):
+        if not self._reg_mode:
+            return
         existing_imgs, existing_labels = [], []
         if os.path.exists(FACE_IMGS_FILE):
             with open(FACE_IMGS_FILE, "rb") as f:
@@ -682,8 +697,7 @@ class App(ctk.CTk):
         self._reg_mode    = False
         self._reg_buffer  = []
         self._log(f"ลงทะเบียนสำเร็จ! รวม {self._known_count} ตัวอย่าง")
-        self.reg_btn.configure(text="+ ลงทะเบียนใบหน้าใหม่", state="normal",
-                                text_color=C_ACCENT)
+        self._reset_reg_btn()
         self.face_count_lbl.configure(text=str(self._known_count))
 
     def _clear_face_data(self):
@@ -717,7 +731,10 @@ class App(ctk.CTk):
             text="■  Stop", fg_color=C_BTN_RUN,
             border_color="#2d5e2d", hover_color="#243324", text_color=C_ON
         )
-        det = "MediaPipe" if _HAS_MP else "Haar"
+        det = "MediaPipe" if _HAS_MP else "Haar (fallback)"
+        if not _HAS_MP:
+            self._log(f"[warn] MediaPipe ใช้ไม่ได้ → {_MP_ERR}")
+            self._log("[warn] ใช้ Haar แทน — ความแม่นยำต่ำกว่า (แว่น/หันหน้า)")
         rec = f"LBPH ({self._known_count} ตย.)" if self._recognizer else "any-face"
         self.status_dot.configure(text_color=C_ON)
         self.status_label.configure(text="ตรวจพบใบหน้า", text_color=C_ON)
@@ -756,14 +773,10 @@ class App(ctk.CTk):
         self._reg_mode = False
         self._cancel_jiggle_on()
         self._cancel_jiggle_off()
-        try:
-            self.use_jiggle.trace_remove("write",
-                self.use_jiggle.trace_info()[0][1])
-        except Exception:
-            pass
         if self._overlay:
             self._overlay.destroy()
             self._overlay = None
+        self.screen_off = False
         ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
         if self.cap:
             self.cap.release()
@@ -781,9 +794,7 @@ class App(ctk.CTk):
         self.cam_label.configure(image=None, text="Camera Feed")
         self.screen_badge_dot.configure(text_color=C_VDIM)
         self.screen_badge_lbl.configure(text="Screen OFF", text_color=C_DIM)
-        self.reg_btn.configure(text="+ ลงทะเบียนใบหน้าใหม่",
-                                state="normal" if _HAS_LBPH else "disabled",
-                                text_color=C_ACCENT)
+        self._reset_reg_btn()
         self._log("หยุดทำงาน")
 
     # ── Tick ──────────────────────────────────────────────────────────────────
@@ -1052,6 +1063,7 @@ class App(ctk.CTk):
             except Exception:
                 pass
             self._overlay = None
+        self.screen_off = False
         ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
 
         # Release camera + tray in background so UI doesn't freeze

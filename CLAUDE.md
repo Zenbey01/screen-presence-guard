@@ -9,18 +9,21 @@ Webcam-based face detection app that keeps the screen "on" when the user is pres
 ## File structure
 ```
 screen-presence-guard/
-├── main.py                    # entire app (~950 lines)
-├── icon.ico                   # app icon (person in blue frame)
-├── make_icon.py               # regenerate icon.ico
-├── create_shortcut.ps1        # creates launcher in folder + Desktop shortcut (run once)
-├── Screen Presence Guard.lnk  # launcher shortcut in project folder
-├── requirements.txt           # pip dependencies
-├── face_model.yml             # LBPH face model (gitignore this)
-├── face_imgs.pkl              # training images pool (gitignore this)
-├── dist/ScreenPresenceGuard/  # PyInstaller build for distribution
-│   ├── ScreenPresenceGuard.exe
-│   └── ติดตั้ง shortcut.bat
-└── ScreenPresenceGuard.zip    # ready-to-share archive
+├── main.py                          # entire app (~1095 lines)
+├── blaze_face_short_range.tflite    # MediaPipe face detector model (230KB, committed)
+├── icon.ico                         # app icon (person in blue frame)
+├── make_icon.py                     # regenerate icon.ico
+├── build.ps1                        # PyInstaller build → dist/ + zip + installer bat
+├── create_shortcut.ps1              # dev-machine launcher + Desktop shortcut (run once)
+├── launch.vbs                       # windowless python launcher
+├── Screen Presence Guard.lnk        # launcher shortcut in project folder
+├── README.md                        # user-facing docs (Thai)
+├── CLAUDE.md / AGENTS.md            # this file — keep the two IDENTICAL
+├── requirements.txt                 # pip dependencies
+├── face_model.yml                   # LBPH face model (gitignored)
+├── face_imgs.pkl                    # training images pool (gitignored)
+├── dist/ScreenPresenceGuard/        # PyInstaller build (gitignored)
+└── ScreenPresenceGuard.zip          # ready-to-share archive (gitignored)
 ```
 
 ## Key architecture
@@ -36,26 +39,43 @@ class _BlackOverlay(tk.Toplevel):
 
 ### Detection pipeline
 - **Preview**: Haar cascade (fast, display only, NOT for presence decisions)
-- **Presence decision**: MediaPipe FaceDetection (model_selection=0) — robust, handles glasses
+- **Presence decision**: MediaPipe `FaceDetector` (Tasks API, `blaze_face_short_range.tflite`,
+  `min_detection_confidence=0.5`) — robust, handles glasses
 - **Identity**: LBPH recognizer (`cv2.face`) — user-specific, threshold 90.0
 - Background thread every `interval` seconds → `_bg_check()` → `_handle_presence()`
 
+```python
+# module level, AFTER _DIR is defined (needs the model path)
+MP_MODEL_FILE = os.path.join(_DIR, "blaze_face_short_range.tflite")
+_HAS_MP, _MP_ERR   # _MP_ERR is logged by _start() — the init failure is NEVER silent
+_detect_boxes()    # → [(x, y, w, h)] from det.bounding_box.origin_x/origin_y/width/height
+```
+**Do not** use the legacy `mp.solutions.face_detection` API — mediapipe >= 0.10.30
+removed the whole `mp.solutions` namespace. Tasks API only.
+Keyboard is a wake trigger only (overlay bindings); `_handle_presence` sees face + mouse.
+
 ### Face registration
-- 40 sample frames → LBPH train → saves `face_model.yml` + `face_imgs.pkl`
+- 40 sample frames (`REG_SAMPLES`) → LBPH train → saves `face_model.yml` + `face_imgs.pkl`
 - Re-registering ADDS to existing pool (multiple sessions = more diversity)
 - If no model: any face counts as "present"
+- Cancellable: `reg_btn` toggles to cancel while `_reg_mode` — `_start_register` →
+  `_cancel_register`. `_bg_register` / `_finish_register` both bail if `_reg_mode` is False
+  (a queued thread must not resurrect a cancelled run). `_reset_reg_btn()` restores the button.
 
 ### Mouse circle jiggle (two independent systems)
 ```python
 # Screen-ON jiggle: prevents IT lock while screen is on
-jiggle_on     = BooleanVar   # toggle
-jiggle_on_sec = IntVar(60)   # interval seconds
+jiggle_on     = BooleanVar
+jiggle_on_sec = IntVar(60)
 # _sched_on() → _do_jiggle_on() → thread: _work_on() → _circle_move()
 
 # Screen-OFF jiggle: keeps Windows from locking while overlay is dark
 jiggle_off     = BooleanVar
 jiggle_off_sec = IntVar(60)
 # _sched_off() → _do_jiggle_off() → thread: _work_off() → _circle_move()
+
+# _sched() is shared and getattr-based: attr names are passed as STRINGS,
+# so grepping for `jiggle_off_sec` will not show the read site.
 
 def _circle_move(x, y, radius=10, steps=12):
     # moves cursor in 12-point circle, returns to origin
@@ -67,21 +87,21 @@ def _circle_move(x, y, radius=10, steps=12):
 ### Wake triggers (user-configurable)
 - `use_mouse`: mouse movement wakes overlay
 - `use_keyboard`: keypress wakes overlay
-- Both checked in `_BlackOverlay` bindings AND `_handle_presence`
 - `_jiggling` flag bypasses all wake checks during jiggle
 
 ### Screen state
 ```python
 self.screen_off = False   # True when overlay is shown
 
-def _sleep():   # show overlay, update all status widgets
-def _wake(trigger):  # destroy overlay, update widgets (guard: if not screen_off: return)
+def _sleep():         # show overlay, update all status widgets
+def _wake(trigger):   # destroy overlay, update widgets (guard: if not screen_off: return)
+# _stop() and _close() also reset screen_off = False after destroying the overlay
 ```
 
 ### Close / Stop
-- `_close()`: sets `running=False`, cancels jiggle timers, destroys overlay,
+- `_close()`: sets `running=False`, destroys overlay, resets `screen_off`,
   releases camera + stops tray in **daemon thread** (non-blocking), destroys window after 200ms
-- `_stop()`: same cleanup but keeps window open
+- `_stop()`: same cleanup but keeps window open; also cancels both jiggle timers
 
 ### Windows API calls
 ```python
@@ -93,50 +113,70 @@ SetCursorPos(x, y)  # move mouse (jiggle)
 
 ## Color palette (dark navy/blue)
 ```python
-C_BG      = "#0d1117"   # main background
-C_SIDEBAR = "#161d2e"   # sidebar / right panel
-C_CARD    = "#1c2237"   # cards
-C_BANNER  = "#1e3a8a"   # top banner
-C_ACCENT  = "#4361ee"   # blue accent
-C_ON      = "#3fb950"   # green (face detected)
-C_WARN    = "#f9a825"   # yellow (countdown)
-C_OFF     = "#f85149"   # red (screen off / no face)
+C_BG      = "#090c15"   # outer bg / window
+C_PANEL   = "#0c0f1a"   # inner panel
+C_BAR     = "#0e1220"   # title / status bar
+C_CAM     = "#080b12"   # camera area
+C_CARD    = "#141928"   # chips / cards
+C_BORDER  = "#1e2840"   # borders
+C_ACCENT  = "#3b82f6"   # blue (action)
+C_ON      = "#22c55e"   # green (face on)
+C_WARN    = "#f59e0b"   # amber (countdown)
+C_OFF     = "#ef4444"   # red (screen off)
+C_TEXT1/2/3, C_DIM, C_VDIM, C_BTN_RUN
+FONT = "Segoe UI"; FONT_MONO = "Consolas"
 ```
 
-## Layout (960×610, 3-column)
+## Layout (960×610, not resizable)
 ```
-[sidebar 60px] | [main area] | [right panel 284px]
-sidebar: icon, status dot, close button
-main: banner header, camera preview (CTkLabel+CTkImage), 3 stat cards, Start/Tray buttons
-right: Face Registration, Settings (sliders + toggles), Log textbox
+┌───────────────────────────────────────────────────────┐
+│ status strip (h=72): dot + label + sub | Screen badge │  _build_status_strip()
+├────────────────────────────────┬──────────────────────┤
+│ camera preview (CTkLabel)      │ tab bar (3 tabs)     │  _build_body()
+│ 3 stat chips                   │ ┌──────────────────┐ │   ├ _build_left()
+│ Start / Minimize to tray       │ │ settings/faces/  │ │   └ _build_right()
+│                                │ │ log frame        │ │
+└────────────────────────────────┴──────────────────────┘
 ```
+Right panel is tabbed — `_tab_frames` / `_tab_btns` dicts, switched by `_switch_tab(key)`
+using `grid()` / `grid_remove()`. Keys: `"settings"`, `"faces"`, `"log"`.
 
-## UI widget references (update in _handle_presence / _sleep / _wake)
+## UI widget references (update in _handle_presence / _sleep / _wake / _start / _stop)
 ```python
-self.banner_title, self.banner_sub, self.banner_badge
-self.sidebar_dot
-self.dot, self.status_lbl, self.screen_lbl
-self.face_stat, self.screen_stat, self.time_stat
-self.cam_label
+self.status_dot, self.status_label, self.status_sub   # status strip
+self.screen_badge_dot, self.screen_badge_lbl         # Screen ON/OFF badge
+self.face_stat, self.screen_stat, self.time_stat     # 3 chips (via _chip())
+self.cam_label                                       # camera preview
+self.start_btn, self.reg_btn, self.face_count_lbl, self.log_box
 ```
 
 ## Dependencies
 ```
 opencv-contrib-python   # cv2.face (LBPH) + cv2.data.haarcascades
-mediapipe               # FaceDetection
+mediapipe>=0.10.0       # tasks.python.vision.FaceDetector
 customtkinter           # dark-theme GUI
 Pillow                  # image processing
 pystray                 # system tray icon
 ```
+`numpy` is used directly but comes in transitively via opencv/mediapipe.
 
 ## Distribution
 - Build: `.\build.ps1` → `dist/ScreenPresenceGuard/` → `ScreenPresenceGuard.zip`
-- Recipients: extract zip → run `ติดตั้ง shortcut.bat` → double-click Desktop shortcut
+- `build.ps1` must `--add-data` **both** `icon.ico` and `blaze_face_short_range.tflite`;
+  they land in `_internal/`, which is what `_DIR` resolves to when frozen
+- The generated installer bat points `IconLocation` at the **exe**
+  (icon.ico is inside `_internal/`, not next to the exe)
+- Recipients: extract zip → run the installer bat → double-click Desktop shortcut
 - No Python required on target machine (PyInstaller --onedir bundle)
 
 ## Known issues / gotchas
+- `main.py` is saved with a **UTF-8 BOM** — read it as `utf-8-sig` when scripting edits
+  (plain `utf-8` + `ast.parse` fails on U+FEFF)
 - `time.sleep()` must NOT run on main tkinter thread → always use daemon thread for jiggle
 - `_jiggle_on_id` / `_jiggle_off_id`: cancel before re-scheduling to prevent duplicate loops
 - `_wake()` has guard `if not self.screen_off: return` — prevents double-call
+- `_tick()` rebuilds a `CTkImage` every 33 ms; do not add more per-frame allocations
 - face_model.yml / face_imgs.pkl are personal — exclude from shared distribution
 - Desktop shortcut: recreate via `create_shortcut.ps1` if Python path changes
+- Never swallow a dependency-init exception silently (see `_MP_ERR`) — a dead MediaPipe
+  fell back to Haar unnoticed for two months

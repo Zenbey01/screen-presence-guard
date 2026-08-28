@@ -1,5 +1,5 @@
 opencv-contrib-python
-mediapipe
+mediapipe>=0.10.0
 customtkinter
 Pillow
 pystray

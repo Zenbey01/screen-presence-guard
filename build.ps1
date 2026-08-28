@@ -1,4 +1,4 @@
-$appDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+﻿$appDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $appDir
 
 # Clean old builds
@@ -9,6 +9,7 @@ pyinstaller `
   --windowed `
   --icon "icon.ico" `
   --add-data "icon.ico;." `
+  --add-data "blaze_face_short_range.tflite;." `
   --collect-all mediapipe `
   --collect-all customtkinter `
   --collect-all cv2 `
@@ -24,7 +25,7 @@ if (Test-Path "dist\ScreenPresenceGuard") {
 @echo off
 chcp 65001 >nul
 set "DIR=%~dp0"
-powershell -Command "$ws=New-Object -ComObject WScript.Shell;$lnk=$ws.CreateShortcut([Environment]::GetFolderPath('Desktop')+'\Screen Presence Guard.lnk');$lnk.TargetPath='%DIR%ScreenPresenceGuard.exe';$lnk.WorkingDirectory='%DIR%';$lnk.IconLocation='%DIR%icon.ico,0';$lnk.Save()"
+powershell -Command "$ws=New-Object -ComObject WScript.Shell;$lnk=$ws.CreateShortcut([Environment]::GetFolderPath('Desktop')+'\Screen Presence Guard.lnk');$lnk.TargetPath='%DIR%ScreenPresenceGuard.exe';$lnk.WorkingDirectory='%DIR%';$lnk.IconLocation='%DIR%ScreenPresenceGuard.exe,0';$lnk.Save()"
 echo สร้าง Shortcut บน Desktop แล้ว!
 pause
 '@

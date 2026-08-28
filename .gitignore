@@ -4,9 +4,11 @@
 /dist/
 /build/
 /ScreenPresenceGuard.zip
+/ScreenPresenceGuard-macOS.zip
 *.spec
 __pycache__/
 *.pyc
+.DS_Store
 
 # Personal face training data
 /face_model.yml

@@ -1,0 +1,195 @@
+================================================================================
+ fix/camera-open-and-macos-support
+ แก้กล้องไม่เปิดบน Windows + ทำให้รันได้ทั้ง Windows และ macOS
+================================================================================
+
+ไฟล์นี้เขียนไว้ให้อ่านก่อนเทสบนเครื่อง Windows
+อ่าน "ส่วนที่ 4" ก่อนได้เลยถ้าอยากรู้ว่าต้องเทสอะไรบ้าง
+
+
+--------------------------------------------------------------------------------
+ 1. ทำไมกล้องถึงไม่เปิดใน demo-0.5
+--------------------------------------------------------------------------------
+
+ตัว release ไม่ได้พัง — zip 122 MB แนบขึ้น GitHub ครบถ้วน
+บั๊กอยู่ในโค้ดเปิดกล้อง ซึ่ง demo-0.5 เขียนไว้บรรทัดเดียว:
+
+    cap = cv2.VideoCapture(0)
+
+บรรทัดนี้มีจุดพลาด 3 อย่างซ้อนกัน
+
+  (1) ไม่ระบุ backend
+      OpenCV บน Windows default ไปที่ MSMF ซึ่งเปิด integrated webcam
+      หลายรุ่นไม่ขึ้น — คืน isOpened() == False หรือแย่กว่านั้นคือคืน True
+      แล้วไม่ส่งเฟรมเลย  กล้องตัวเดียวกันเปิดด้วย DirectShow ได้ปกติ
+      >>> อันนี้น่าจะเป็นสาเหตุจริงของเครื่องที่เทส
+
+  (2) fix device index 0 ตายตัว
+      ถ้าเครื่องมี dock / virtual cam (OBS, Teams background) / กล้อง USB
+      เสียบอยู่ กล้องในตัวจะถูกดันไปเป็น index 1 หรือ 2
+
+  (3) ไม่มี diagnostic เลย
+      build เป็น --windowed คือไม่มี console  ข้อความ error จริงของ OpenCV
+      ที่ปกติพิมพ์ลง stderr เลยหายไปหมด เหลือแค่ "ERROR: เปิดกล้องไม่ได้"
+      ซึ่งบอกอะไรไม่ได้เลยว่าติดตรงไหน
+
+สาเหตุนอกโค้ดที่ต้องเช็คด้วยมือ (เจอบ่อยบนเครื่องที่ IT คุม):
+  - Settings > Privacy & security > Camera
+      ต้องเปิดทั้ง "Camera access" และ "Let desktop apps access your camera"
+  - มีแอปจับกล้องค้างอยู่ (Teams / Zoom / Meet)
+  - policy ขององค์กรปิดกล้องไว้
+
+
+--------------------------------------------------------------------------------
+ 2. แก้อะไรไปบ้าง
+--------------------------------------------------------------------------------
+
+[main.py]  -- แก้กล้อง
+  + _camera_backends()   คืนลำดับ backend ที่ควรลอง แยกตาม OS
+                           Windows : DirectShow -> MSMF -> default
+                           macOS   : AVFoundation -> default
+                           Linux   : V4L2 -> default
+  + _open_camera(log)    ไล่ backend x device 0..2 และ "รับเฉพาะตัวที่
+                           read() ได้เฟรมจริง" ไม่เชื่อ isOpened() อย่างเดียว
+                           เพราะ MSMF และกล้องที่ถูกแอปอื่นจับไว้ ต่างก็คืน
+                           isOpened() == True แล้วไม่ส่งเฟรมทั้งคู่
+                           ทุกครั้งที่ลอง เขียน log ลงแท็บ "บันทึก"
+  + _CAMERA_HELP         ข้อความบอกสาเหตุตอนล้มเหลว แยกข้อความตาม OS
+  ~ _start()             เรียก _open_camera() แทน cv2.VideoCapture(0)
+
+[spgplatform/]  -- ของใหม่ทั้งโฟลเดอร์ (แยก OS call ออกจาก main.py)
+  __init__.py   เลือก backend ตาม sys.platform + เอกสาร API
+  _win.py       Win32 (user32/kernel32) -- ย้ายโค้ดเดิมจาก main.py มา
+  _mac.py       CoreGraphics + IOKit ผ่าน ctypes -- "ไม่ต้องลง pyobjc"
+
+  ทั้งสองไฟล์ export ฟังก์ชันชุดเดียวกัน 12 ตัว ชื่อและความหมายตรงกันเป๊ะ:
+    NAME, data_dir, keep_display_on, keep_system_on, release_awake,
+    reset_idle, move_cursor, warp_cursor, cursor_pos, idle_ms,
+    any_key_pressed, virtual_screen, preflight
+
+[main.py]  -- ตัด OS call ออกหมด
+  - import ctypes                    (ไม่มี ctypes เหลือใน main.py แล้ว)
+  - _POINT / _MOUSEINPUT / _INPUT / _LASTINPUTINFO / _send_move
+  - ES_CONTINUOUS / ES_SYSTEM_REQUIRED / ES_DISPLAY_REQUIRED
+  ~ SetThreadExecutionState 5 จุด -> plat.keep_display_on() /
+                                      plat.keep_system_on() /
+                                      plat.release_awake()
+  ~ GetSystemMetrics(76-79)       -> plat.virtual_screen()
+  ~ %LOCALAPPDATA%                -> plat.data_dir()
+  ~ _circle_move()                -> plat.move_cursor / plat.warp_cursor
+  + _start() log plat.preflight() -- เตือนสิทธิ์ที่ยังไม่ได้เปิด (macOS)
+  = เหลือ alias 4 ตัว (_reset_idle / _cursor_pos / _idle_ms /
+    _any_key_pressed) ชี้ไปที่ shim เพื่อให้ call site เดิมอ่านเหมือนเดิม
+
+[build.sh]        ใหม่ -- บิ้ว .app บน macOS
+[icon.icns]       ใหม่ -- ไอคอนสำหรับ macOS bundle
+[build.ps1]       + --hidden-import spgplatform._win
+[build.yml]       + job "macos" (บิ้ว .app แนบเข้า Release เดียวกับ Windows)
+                  + step verify ว่า spgplatform import ได้บน runner จริงทั้ง 2 OS
+                  ~ แก้ race ตอนสองงานสร้าง Release พร้อมกัน
+[README.md]       ~ เขียนใหม่: รองรับ 2 OS + ตารางสิทธิ์ macOS
+[RELEASE_NOTES]   ~ เขียนใหม่: ตารางดาวน์โหลด 2 ไฟล์ + วิธีแก้กล้องไม่เปิด
+[CLAUDE / AGENTS] ~ section ใหม่ "The platform shim" + ตาราง idle 2 OS
+[.gitignore]      + ScreenPresenceGuard-macOS.zip, .DS_Store
+
+
+--------------------------------------------------------------------------------
+ 3. เรื่อง idle timer -- อ่านก่อนแก้ jiggle
+--------------------------------------------------------------------------------
+
+แต่ละ OS มี call ที่ "ดูเหมือนใช่" แต่ไม่ทำงาน และไม่ error ให้รู้ตัว
+ทุกบรรทัดข้างล่างวัดจริง ไม่ได้อ่านจากเอกสาร
+
+  Win11 / SetLastInputInfo
+      user32 ไม่ได้ export ออกมาเลย  MSDN มี แต่ของจริงไม่มี
+      _reset_idle() เดิมเลยโยน AttributeError ทุกครั้งอยู่หลายเดือน
+
+  Win11 / SetCursorPos
+      เมาส์ขยับ แต่ Windows ไม่นับเป็น input  idle 7125ms -> 7203ms
+      กันล็อกไม่ได้
+
+  Win11 / SendInput
+      รีเซ็ตได้จริง 7203ms -> 78ms  ขยับแบบ relative (0,0) เป็น no-op
+      ที่มองไม่เห็นแต่ยังนับเป็น input -- reset_idle() ใช้อันนี้
+
+  macOS 15 / CGWarpMouseCursorPosition
+      เมาส์ขยับ idle ไม่ขยับ 42.44s -> 42.44s  (กับดักเดียวกับ SetCursorPos)
+      เลยเหมาะกับการ snap เมาส์กลับที่เดิมโดยไม่ล้าง reset
+
+  macOS 15 / IOPMAssertionDeclareUserActivity
+      คืน success แต่ HID idle ไม่ขยับเลย  มันเลื่อนแค่ "จอหลับ"
+      ไม่ได้เลื่อนเวลาล็อก
+
+  macOS 15 / CGEventPost ที่พิกัดเดิม
+      macOS ทิ้งเงียบ ๆ  idle 45.45s -> 45.58s (ยังนับต่อ)
+
+  macOS 15 / CGEventPost ที่ขยับจริง
+      รีเซ็ตได้จริง 17.62s -> 0.19s ทั้ง 3 counter
+      (combined, HID-state, ioreg HIDIdleTime)
+
+ผลคือ reset_idle() บน macOS ซ่อนไม่ได้แบบ SendInput(0,0) บน Windows
+_mac.reset_idle() เลยขยับ 1px แล้ว warp กลับทันที -- warp ไม่ล้าง reset
+เพราะ warp ไม่นับเป็น input
+
+
+--------------------------------------------------------------------------------
+ 4. เทสอะไรไปแล้ว / ยังไม่ได้เทส  <<< อ่านตรงนี้
+--------------------------------------------------------------------------------
+
+เทสจริงบนเครื่อง macOS ที่เขียนโค้ด:
+  [ok] _open_camera() แยกออกมารัน -> เปิด device 0 (AVFoundation)
+       อ่านเฟรม 1920x1080 ได้
+  [ok] CoreGraphics/IOKit ทุก call ที่ _mac.py ใช้
+  [ok] ตาราง idle ในส่วนที่ 3 ทุกบรรทัดที่เป็น macOS
+  [ok] spgplatform._mac ทั้งโมดูล (assertion lifecycle, move_cursor รีเซ็ต
+       idle จริง, warp ไม่รีเซ็ต)
+  [ok] _win.py กับ _mac.py export ฟังก์ชันตรงกันครบ 12 ตัว
+  [ok] main.py import ผ่านบน macOS -- แต่ stub tkinter/customtkinter/
+       PIL/pystray ไว้ ได้แค่ระดับ module ไม่ได้เปิด GUI
+  [ok] build.yml เป็น YAML ที่ parse ได้, build.sh syntax ผ่าน
+
+ยังไม่ได้เทสเลย:
+  [--] GUI จริงบน macOS -- หน้าต่าง, preview, overlay ดำ, tray, jiggle,
+       ลงทะเบียนใบหน้า
+  [--] build.sh / PyInstaller .app -- ไม่เคยรัน
+  [--] Windows ทั้งหมด ไม่มีเครื่องเทส
+       รวมถึง _win.py, build.ps1, CI job และ "ตัวแก้กล้องเอง"
+
+จุดที่เสี่ยงที่สุดบน Windows:
+  _win.move_cursor() เป็นตรรกะ "ใหม่" ไม่ใช่โค้ดเดิมที่ย้ายมาเฉย ๆ
+  ของเดิม _circle_move จำตำแหน่งเอง (dead reckoning) แล้วส่ง delta
+  ของใหม่อ่าน GetCursorPos() ทุก step แล้วค่อยคำนวณ delta
+  ควรจะแม่นกว่าเดิมเพราะไม่สะสม error จาก pointer acceleration
+  แต่ยังไม่เคยรันบน Windows แม้แต่ครั้งเดียว
+
+
+--------------------------------------------------------------------------------
+ 5. เทสบน Windows ยังไง
+--------------------------------------------------------------------------------
+
+  1. push branch นี้ แล้ว tag เป็น demo-0.6 (หรือกด Run workflow ในแท็บ
+     Actions ก็ได้ จะได้ zip เป็น workflow artifact แทน)
+  2. โหลด ScreenPresenceGuard.zip -> แตกไฟล์ -> รัน exe
+  3. กด Start แล้วดูแท็บ "บันทึก" ทันที
+
+  ต้องเห็นบรรทัดนี้ถ้ากล้องติด:
+      เปิดกล้องสำเร็จ — device 0 (DirectShow)
+      เริ่มทำงาน — windows · MediaPipe + any-face
+
+  ถ้ายังไม่ติด log จะไล่ให้ดูว่าลองอะไรไปแล้วบ้าง เช่น:
+      [warn] device 0 (DirectShow): เปิดได้แต่ไม่ส่งภาพ
+      [warn] device 0 (MSMF): เปิดได้แต่ไม่ส่งภาพ
+      ERROR: เปิดกล้องไม่ได้ — ลองครบทุก backend/device แล้ว
+      ...ตามด้วยรายการสิ่งที่ต้องไปเช็คเอง
+
+  >>> ก๊อป log ทั้งชุดส่งกลับมาได้เลย มันบอกได้ว่าติดที่ backend,
+      ที่ device index, หรือที่ permission
+
+  เช็คต่ออีก 4 อย่าง (เพราะ shim ไปแตะโค้ดส่วนนี้):
+      - กันจอดับ  : ปล่อยแอปรันไว้ จอต้องไม่หลับเอง
+      - overlay   : เดินออกจากกล้อง จอต้องดำครบทุกจอ ไม่ขึ้น lock screen
+      - ปลุกจอ    : ขยับเมาส์ / กดคีย์ -> overlay หายทันที ไม่ถามรหัส
+      - jiggle    : เปิด "หมุนเมาส์ขณะจอเปิด" ตั้ง 5 วิ
+                    เมาส์ต้องหมุนเป็นวงแล้วกลับที่เดิม
+                    log ต้องขึ้น idle ก่อน 34s -> idle หลัง 0ms
+                    ถ้า idle หลังไม่ลง = move_cursor ตัวใหม่มีปัญหา

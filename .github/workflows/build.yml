@@ -1,13 +1,18 @@
-name: Build Windows release
+name: Build releases (Windows + macOS)
 
-# Push a tag and GitHub builds the exe itself, then attaches the zip to the
-# matching Release. Recipients download one file, extract, double-click.
-# The zip is ~140MB, over GitHub's 100MiB per-file limit for the repo itself,
-# so a Release asset is the only way to ship it.
+# Push a tag and GitHub builds both bundles itself, then attaches them to the
+# matching Release. Recipients download one file for their OS, extract,
+# double-click.
+#
+# Each bundle is >100MiB, over GitHub's per-file limit for the repo itself, so
+# Release assets are the only way to ship them.
 #
 # No PowerShell here-strings anywhere below: `'@` / `"@` must sit at column 0,
 # which YAML block indentation makes impossible. Hence --notes-file and the
 # single-line python check.
+#
+# Both jobs create the Release if it is missing, so whichever finishes first
+# wins and the other one falls through — see the note in each upload step.
 on:
   push:
     tags:
@@ -16,10 +21,10 @@ on:
   workflow_dispatch:          # rebuild a tag from the Actions tab
 
 permissions:
-  contents: write             # create the Release and upload the asset
+  contents: write             # create the Release and upload the assets
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
 
     steps:
@@ -40,6 +45,12 @@ jobs:
       # to Haar silently.
       - name: Verify MediaPipe Tasks API loads the face model
         run: python -c "import mediapipe, os; from mediapipe.tasks.python import vision; from mediapipe.tasks.python.core.base_options import BaseOptions as B; m='blaze_face_short_range.tflite'; assert os.path.exists(m), 'face model missing from repo'; vision.FaceDetector.create_from_options(vision.FaceDetectorOptions(base_options=B(model_asset_path=m), running_mode=vision.RunningMode.IMAGE)); print('mediapipe', mediapipe.__version__, 'Tasks API OK')"
+
+      # The app must import cleanly on this OS before it is worth bundling.
+      # spgplatform picks its backend at import time, so this also proves the
+      # Win32 shim loads.
+      - name: Verify the Windows platform backend imports
+        run: python -c "import spgplatform as p; print('backend', p.NAME); print('screen', p.virtual_screen()); print('idle_ms', p.idle_ms()); print('preflight', p.preflight())"
 
       # build.ps1 is the single source of truth for the PyInstaller flags, and it
       # already exits 1 if the bundle is missing icon.ico or the face model.
@@ -65,7 +76,12 @@ jobs:
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --title $tag --notes-file .github/RELEASE_NOTES.md
-            if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+            if ($LASTEXITCODE -ne 0) {
+              # The macOS job may have created it in the same second. That is
+              # fine as long as it exists now.
+              gh release view $tag *> $null
+              if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+            }
           }
           gh release upload $tag ScreenPresenceGuard.zip --clobber
           if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }
@@ -75,6 +91,62 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
-          name: ScreenPresenceGuard
+          name: ScreenPresenceGuard-windows
           path: ScreenPresenceGuard.zip
+          retention-days: 14
+
+  macos:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Verify MediaPipe Tasks API loads the face model
+        run: python -c "import mediapipe, os; from mediapipe.tasks.python import vision; from mediapipe.tasks.python.core.base_options import BaseOptions as B; m='blaze_face_short_range.tflite'; assert os.path.exists(m), 'face model missing from repo'; vision.FaceDetector.create_from_options(vision.FaceDetectorOptions(base_options=B(model_asset_path=m), running_mode=vision.RunningMode.IMAGE)); print('mediapipe', mediapipe.__version__, 'Tasks API OK')"
+
+      # Proves the CoreGraphics/IOKit ctypes bindings resolve on the runner —
+      # a wrong restype or a renamed symbol would otherwise surface only when a
+      # user clicks Start.
+      - name: Verify the macOS platform backend imports
+        run: python -c "import spgplatform as p; print('backend', p.NAME); print('screen', p.virtual_screen()); print('idle_ms', p.idle_ms()); print('data_dir', p.data_dir()); print('preflight', p.preflight())"
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Report artifact
+        run: |
+          ls -la dist/ScreenPresenceGuard.app/Contents
+          echo "zip: $(du -m ScreenPresenceGuard-macOS.zip | cut -f1) MB"
+          plutil -p dist/ScreenPresenceGuard.app/Contents/Info.plist | grep -E "NSCamera|CFBundleName|CFBundleIdentifier"
+
+      - name: Attach zip to the Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.ref_name }}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            # The Windows job may have created it in the same second; only treat
+            # it as a failure if the release still does not exist afterwards.
+            gh release create "$tag" --title "$tag" --notes-file .github/RELEASE_NOTES.md || true
+            gh release view "$tag" >/dev/null 2>&1 || { echo "gh release create failed"; exit 1; }
+          fi
+          gh release upload "$tag" ScreenPresenceGuard-macOS.zip --clobber
+
+      - name: Upload as workflow artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenPresenceGuard-macos
+          path: ScreenPresenceGuard-macOS.zip
           retention-days: 14

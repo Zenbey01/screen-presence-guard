@@ -6,40 +6,64 @@
 
 ## หลักการ
 
-ไม่ได้สั่งให้ Windows ดับจอ (นั่นจะโดน lock screen) แต่เอา **หน้าต่างสีดำเต็มจอ**
-มาคลุมไว้แทน — ตาเห็นเหมือนจอดับ แต่ Windows ยังคิดว่าจออยู่ ไม่มี lock ไม่ต้องใส่รหัส
+ไม่ได้สั่งให้ OS ดับจอ (นั่นจะโดน lock screen) แต่เอา **หน้าต่างสีดำเต็มจอ**
+มาคลุมไว้แทน — ตาเห็นเหมือนจอดับ แต่ OS ยังคิดว่าจอเปิดอยู่ ไม่มี lock ไม่ต้องใส่รหัส
 
 - ตรวจใบหน้าจากเว็บแคมทุก N วินาที (ปรับได้)
-- เจอหน้า → กันจอดับด้วย `SetThreadExecutionState`
+- เจอหน้า → กันจอดับ (`SetThreadExecutionState` / `IOPMAssertion`)
 - ไม่เจอหน้าครบ N วินาที → overlay ดำคลุมจอ
 - กลับมา / ขยับเมาส์ / กดคีย์ → overlay หายทันที
 
 ## ดาวน์โหลด (ไม่ต้องมี Python)
 
-โหลด `ScreenPresenceGuard.zip` จากหน้า
-[**Releases**](https://github.com/Zenbey01/screen-presence-guard/releases/latest)
-→ แตกไฟล์ → ดับเบิลคลิก `ScreenPresenceGuard.exe`
+โหลดจากหน้า [**Releases**](https://github.com/Zenbey01/screen-presence-guard/releases/latest)
 
-อยากได้ shortcut บน Desktop ให้รัน `ติดตั้ง shortcut.bat` ในโฟลเดอร์ที่แตกออกมา
+| เครื่อง | ไฟล์ | วิธีเปิด |
+|---|---|---|
+| Windows 10/11 | `ScreenPresenceGuard.zip` | แตกไฟล์ → ดับเบิลคลิก `ScreenPresenceGuard.exe` |
+| macOS (Apple Silicon) | `ScreenPresenceGuard-macOS.zip` | แตกไฟล์ → **คลิกขวา** ที่ `.app` → **Open** → **Open** |
 
-ครั้งแรก Windows อาจขื้น *"Windows protected your PC"* เพราะไฟล์ไม่ได้เซ็น
-ให้กด **More info** → **Run anyway** — ไฟล์นี้บิ้วโดย GitHub Actions
-จากสอร์สใน repo นี้ ตรวจขั้นตอนได้ที่แท็บ Actions
+บน Windows อยากได้ shortcut บน Desktop ให้รัน `ติดตั้ง shortcut.bat` ในโฟลเดอร์ที่แตกออกมา
 
-## รองรับเฉพาะ Windows
+ครั้งแรก Windows อาจขึ้น *"Windows protected your PC"* / macOS อาจบล็อกด้วย Gatekeeper
+เพราะไฟล์ไม่ได้เซ็นใบรับรอง — Windows กด **More info** → **Run anyway**,
+macOS ต้องคลิกขวา → Open (ดับเบิลคลิกเฉย ๆ จะไม่ผ่าน)
 
-**macOS กับ Linux ใช้ไม่ได้** — กลไกหลักทั้งหมดเรียก Win32 API ตรง ๆ
-ผ่าน `ctypes.windll` ซึ่งไม่มีอยู่บน OS อื่นเลย:
+ทั้งสองไฟล์บิ้วโดย GitHub Actions จากสอร์สใน repo นี้ ตรวจขั้นตอนได้ที่แท็บ Actions
 
-| หน้าที่ | Win32 API |
+## รองรับ Windows และ macOS
+
+ทุกการเรียก OS ถูกรวมไว้ที่แพ็กเกจเดียว `spgplatform/` แล้วเลือก backend
+ตาม `sys.platform` — `main.py` ไม่เรียก `ctypes` เองอีกต่อไป
+
+| หน้าที่ | Windows | macOS |
+|---|---|---|
+| กันจอดับ / กัน sleep | `SetThreadExecutionState` | `IOPMAssertionCreateWithName` |
+| reset idle timer | `SendInput` | `CGEventPost` (ต้องขยับจริง) |
+| ขยับ / อ่านตำแหน่งเมาส์ | `SetCursorPos`, `GetCursorPos` | `CGWarpMouseCursorPosition`, `CGEventGetLocation` |
+| อ่านค่า idle | `GetLastInputInfo` | `CGEventSourceSecondsSinceLastEventType` |
+| ตรวจคีย์บอร์ด | `GetAsyncKeyState` | `CGEventSourceKeyState` |
+| ขอบจอหลายจอ | `GetSystemMetrics(76-79)` | `CGGetActiveDisplayList` + `CGDisplayBounds` |
+
+macOS ใช้ `ctypes` เรียก CoreGraphics/IOKit ตรง ๆ **ไม่ต้องลง `pyobjc`**
+
+### macOS ต้องเปิดสิทธิ์ก่อน
+
+ไปที่ **System Settings → Privacy & Security** แล้วเปิดให้แอปนี้:
+
+| สิทธิ์ | ถ้าไม่เปิด |
 |---|---|
-| กันจอดับ / กัน sleep | `SetThreadExecutionState` |
-| reset idle timer + ขยับเมาส์ | `SendInput`, `SetCursorPos`, `GetCursorPos` |
-| อ่านค่า idle | `GetLastInputInfo`, `GetTickCount` |
-| ตรวจคีย์บอร์ด | `GetAsyncKeyState` |
-| ขอบจอหลายจอ | `GetSystemMetrics(76-79)` |
+| **Camera** | ตรวจใบหน้าไม่ได้เลย (ระบบถามให้ตอนกด Start) |
+| **Accessibility** | หมุนเมาส์กันล็อก + กันจอหลับไม่ทำงาน — **เงียบ ไม่มี error** |
+| **Input Monitoring** | คีย์บอร์ดปลุกจอไม่ได้ (เมาส์ยังปลุกได้) |
 
-นอกจากนี้ exe ของ PyInstaller ผูกกับ OS ที่บิ้ว รันข้ามเครื่องไม่ได้
+สองอันหลังระบบไม่ถามให้ ต้องเปิดเอง — แอปจะเขียนเตือนลงแท็บ **บันทึก** ทุกครั้งที่กด Start
+ถ้ายังไม่ได้เปิด
+
+**ข้อจำกัดบน macOS**: overlay ดำครอบได้ทีละจอ ถ้าต่อจอนอกไว้ จอที่เหลือจะยังสว่าง
+(บน Windows ครอบครบทุกจอ)
+
+exe/app ของ PyInstaller ผูกกับ OS ที่บิ้ว — ต้องบิ้วแยกกันคนละไฟล์ ซึ่ง CI ทำให้แล้ว
 
 ## รันจากสอร์ส (สำหรับนักพัฒนา)
 
@@ -86,8 +110,11 @@ python main.py
 ```
 
 `idle` คือค่าที่ policy ล็อกเครื่องแบบมาตรฐานใช้วัด เห็น `34s → 0ms` แปลว่า
-Windows รับ input จริง ไม่ใช่แค่โค้ดเดินผ่าน ตอนจอมืดจะมี heartbeat ทุกนาที
+OS รับ input จริง ไม่ใช่แค่โค้ดเดินผ่าน ตอนจอมืดจะมี heartbeat ทุกนาที
 บอกค่า idle ล่าสุดด้วย ถ้าตัวเลขไต่ขึ้นเรื่อย ๆ คือกันล็อกไม่อยู่
+
+บน macOS ถ้าตัวเลข idle **ไม่ลดลงเลย** แปลว่ายังไม่ได้เปิดสิทธิ์ **Accessibility** —
+macOS จะทิ้ง event ที่แอปยิงเข้าไปแบบเงียบ ๆ ไม่มี error
 
 **หมายเหตุ** — jiggle ไม่ยืดเวลาดับจอ ตั้งรอบหมุนเท่าไรก็ไม่กระทบเวลานับถอยหลัง
 
@@ -97,19 +124,28 @@ Windows รับ input จริง ไม่ใช่แค่โค้ดเ�
 **อย่าแชร์ไปกับคนอื่น**
 
 - รันจาก source: เก็บข้างๆ `main.py` (อยู่ใน `.gitignore` แล้ว)
-- รันจาก exe ที่ build แล้ว: เก็บที่ `%LOCALAPPDATA%\ScreenPresenceGuard`
+- รันจาก exe/app ที่ build แล้ว: Windows เก็บที่ `%LOCALAPPDATA%\ScreenPresenceGuard`,
+  macOS เก็บที่ `~/Library/Application Support/ScreenPresenceGuard`
   เพราะตัว bundle อาจถูกติดตั้งในที่ที่เขียนไฟล์ไม่ได้
 
 ย้ายจาก source ไป exe หรือกลับกัน จะมองไม่เห็นข้อมูลเดิม ต้องลงทะเบียนใหม่ 1 ครั้ง
 
 ## แจกจ่าย (ไม่ต้องมี Python ที่เครื่องปลายทาง)
 
+บิ้วบน OS ไหน ได้ไฟล์ของ OS นั้น — บิ้วข้าม OS ไม่ได้
+
 ```powershell
-.\build.ps1
+.\build.ps1     # Windows → dist\ScreenPresenceGuard\ + ScreenPresenceGuard.zip
+```
+```bash
+./build.sh      # macOS   → dist/ScreenPresenceGuard.app + ScreenPresenceGuard-macOS.zip
 ```
 
-ได้ `dist\ScreenPresenceGuard\` และ `ScreenPresenceGuard.zip`
-ผู้รับแตกไฟล์ → รัน `ติดตั้ง shortcut.bat` → เปิดจาก shortcut บน Desktop
+ผู้รับบน Windows: แตกไฟล์ → รัน `ติดตั้ง shortcut.bat` → เปิดจาก shortcut บน Desktop
+ผู้รับบน macOS: แตกไฟล์ → คลิกขวาที่ `.app` → Open → ลากไปไว้ใน Applications ได้เลย
+
+ปกติไม่ต้องบิ้วเอง — แค่ push tag `demo-*` หรือ `v*` แล้ว GitHub Actions
+บิ้วให้ทั้งสอง OS แล้วแนบเข้า Release เดียวกัน
 
 ## Detection stack
 

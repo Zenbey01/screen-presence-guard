@@ -2,7 +2,6 @@
 """Screen Presence Guard — keeps screen on when you're here, dark when you leave."""
 
 import cv2
-import ctypes
 import math
 import tkinter as tk
 import time
@@ -16,15 +15,17 @@ from PIL import Image, ImageDraw
 import pystray
 from pystray import MenuItem as item
 
+# Every OS call the guard makes goes through this. Windows and macOS
+# disagree about which call resets the input-idle timer, and each has one
+# that looks right and silently does nothing — see spgplatform/_win.py
+# and spgplatform/_mac.py.
+import spgplatform as plat
+
 _HAS_LBPH = hasattr(cv2, "face")
 
 _cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
-
-ES_CONTINUOUS       = 0x80000000
-ES_SYSTEM_REQUIRED  = 0x00000001
-ES_DISPLAY_REQUIRED = 0x00000002
 
 _DIR            = os.path.dirname(os.path.abspath(__file__))
 FACE_SIZE       = (100, 100)
@@ -32,13 +33,13 @@ LBPH_THRESHOLD  = 90.0
 REG_SAMPLES     = 40
 KEY_POLL_MS     = 120
 CAMERA_FAIL_SEC = 5
+CAM_MAX_INDEX   = 2      # probe device 0..2 before giving up
 MAX_LOG_LINES   = 1000
 MP_MODEL_FILE   = os.path.join(_DIR, "blaze_face_short_range.tflite")
 
-# Frozen bundles may be installed in read-only locations such as Program Files.
-_DATA_DIR = (os.path.join(os.environ.get("LOCALAPPDATA", _DIR),
-                          "ScreenPresenceGuard")
-             if getattr(sys, "frozen", False) else _DIR)
+# Frozen bundles may be installed in read-only locations (Program Files, or a
+# signed .app bundle on macOS), so they never write next to themselves.
+_DATA_DIR = plat.data_dir() if getattr(sys, "frozen", False) else _DIR
 FACE_MODEL_FILE = os.path.join(_DATA_DIR, "face_model.yml")
 FACE_IMGS_FILE  = os.path.join(_DATA_DIR, "face_imgs.pkl")
 
@@ -91,81 +92,13 @@ def _fmt_sec(v) -> str:
     return f"{v}s" if v < 60 else f"{v // 60}:{v % 60:02d}"
 
 
-class _POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-# SendInput plumbing. SetCursorPos moves the pointer but Windows does NOT
-# count it as user input, so it never resets the idle timer and cannot hold off
-# an enforced lock. Measured on Win11: after SetCursorPos the idle timer stayed
-# at 7125ms -> 7203ms; one SendInput dropped it to 78ms. Also note that
-# SetLastInputInfo (the old approach here) is documented but not exported by
-# user32 at all, so every _reset_idle() call used to raise AttributeError.
-INPUT_MOUSE      = 0
-MOUSEEVENTF_MOVE = 0x0001
-
-
-class _MOUSEINPUT(ctypes.Structure):
-    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
-                ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
-                ("time", ctypes.c_ulong),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-
-class _INPUT(ctypes.Structure):
-    class _U(ctypes.Union):
-        _fields_ = [("mi", _MOUSEINPUT)]
-    _anonymous_ = ("u",)
-    _fields_ = [("type", ctypes.c_ulong), ("u", _U)]
-
-
-def _send_move(dx: int, dy: int):
-    """Inject a relative mouse move. dx=dy=0 is a no-op move that still
-    registers as input, which is what actually resets the idle timer."""
-    inp = _INPUT(type=INPUT_MOUSE,
-                 mi=_MOUSEINPUT(dx, dy, 0, MOUSEEVENTF_MOVE, 0, None))
-    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
-
-
-def _any_key_pressed() -> bool:
-    """True if any key went down since the previous call.
-
-    Polled rather than bound: the overlay is overrideredirect(True), so Windows
-    never makes it the foreground window. While the user sits in another app,
-    their keystrokes go there and Tk's <KeyPress> binding never fires.
-    Range starts at 0x08 to skip the mouse buttons (0x01-0x06).
-    """
-    gaks = ctypes.windll.user32.GetAsyncKeyState
-    return any(gaks(vk) & 0x0001 for vk in range(0x08, 0xFF))
-
-
-class _LASTINPUTINFO(ctypes.Structure):
-    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong)]
-
-
-def _idle_ms() -> int:
-    """How long Windows thinks the machine has been idle.
-
-    GetLastInputInfo does exist (unlike SetLastInputInfo) and is the value a
-    standard enforced-lock policy watches. Logged around the jiggle so the user
-    can confirm the injection landed: the overlay hides the cursor, so a moving
-    pointer is impossible to observe while the screen is dark.
-    """
-    li = _LASTINPUTINFO()
-    li.cbSize = ctypes.sizeof(li)
-    ctypes.windll.user32.GetLastInputInfo(ctypes.byref(li))
-    return ctypes.windll.kernel32.GetTickCount() - li.dwTime
-
-
-def _reset_idle():
-    """Reset the Windows idle timer without moving the pointer."""
-    _send_move(0, 0)
-
-
-def _cursor_pos() -> tuple[int, int]:
-    pt = _POINT()
-    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-    return (pt.x, pt.y)
+# Thin aliases onto the platform shim. The Win32/CoreGraphics bodies these
+# replaced now live in spgplatform/, one file per OS, with the measurements
+# that justify each call kept next to it.
+_reset_idle      = plat.reset_idle
+_cursor_pos      = plat.cursor_pos
+_idle_ms         = plat.idle_ms
+_any_key_pressed = plat.any_key_pressed
 
 
 def _detect_boxes(frame) -> list:
@@ -182,15 +115,71 @@ def _detect_boxes(frame) -> list:
     return faces.tolist() if len(faces) > 0 else []
 
 
+def _camera_backends() -> list:
+    """(label, cv2 flag) pairs to try, best-first for this OS.
+
+    OpenCV on Windows defaults to MSMF, which fails outright on a lot of
+    integrated and USB webcams: isOpened() returns False, or returns True and
+    then read() never grabs. DirectShow opens those, so it goes first. The
+    --windowed build has no console, so OpenCV's own stderr explanation is
+    thrown away — the per-attempt log lines are the only way anyone can see
+    which backend the machine actually accepted.
+    """
+    if sys.platform == "win32":
+        order = [("DirectShow", "CAP_DSHOW"), ("MSMF", "CAP_MSMF")]
+    elif sys.platform == "darwin":
+        order = [("AVFoundation", "CAP_AVFOUNDATION")]
+    else:
+        order = [("V4L2", "CAP_V4L2")]
+    out = [(n, getattr(cv2, a)) for n, a in order if hasattr(cv2, a)]
+    out.append(("default", cv2.CAP_ANY))
+    return out
+
+
+# Shown verbatim in the log when every candidate fails. Both OSes deny the
+# camera without raising anything cv2 can report, so the causes worth checking
+# by hand are spelled out rather than left to guesswork.
+_CAMERA_HELP = ([
+    "  · Settings → Privacy & security → Camera:",
+    "    เปิด 'Camera access' และ 'Let desktop apps access your camera'",
+    "  · ปิดแอปที่จับกล้องค้างอยู่ (Teams / Zoom / Meet) แล้วกด Start ใหม่",
+    "  · เครื่องที่ IT คุมอยู่ อาจถูก policy ปิดกล้องไว้",
+] if plat.NAME == "windows" else [
+    "  · System Settings → Privacy & Security → Camera: เปิดให้แอปนี้",
+    "  · ถ้าไม่มีแอปนี้ในรายการเลย แปลว่า bundle ไม่มี NSCameraUsageDescription",
+    "    (บิ้วด้วย build.sh เท่านั้น — รันจาก python main.py ตรง ๆ จะติดข้อนี้)",
+    "  · ปิดแอปที่จับกล้องค้างอยู่ (Teams / Zoom / FaceTime) แล้วกด Start ใหม่",
+])
+
+
+def _open_camera(log) -> "cv2.VideoCapture | None":
+    """Open the first camera that actually delivers a frame, or None.
+
+    isOpened() on its own proves nothing: MSMF and a camera already held by
+    another app both report open and then hand back no frames. Every candidate
+    is proved with a real read() before it is accepted. Device 0 is not
+    assumed either — on laptops with a docking station or a virtual cam the
+    built-in webcam is often index 1 or 2.
+    """
+    for name, flag in _camera_backends():
+        for idx in range(CAM_MAX_INDEX + 1):
+            cap = cv2.VideoCapture(idx, flag)
+            if cap.isOpened():
+                ok, _ = cap.read()
+                if ok:
+                    log(f"เปิดกล้องสำเร็จ — device {idx} ({name})")
+                    return cap
+                log(f"[warn] device {idx} ({name}): เปิดได้แต่ไม่ส่งภาพ")
+            cap.release()
+    return None
+
+
 class _BlackOverlay(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master, bg="black", cursor="none")
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        x = ctypes.windll.user32.GetSystemMetrics(76)
-        y = ctypes.windll.user32.GetSystemMetrics(77)
-        w = ctypes.windll.user32.GetSystemMetrics(78)
-        h = ctypes.windll.user32.GetSystemMetrics(79)
+        x, y, w, h = plat.virtual_screen()
         self.geometry(f"{w}x{h}+{x}+{y}")
         def wake(t, var=None):
             if master._jiggling:
@@ -803,11 +792,12 @@ class App(ctk.CTk):
         (self._stop if self.running else self._start)()
 
     def _start(self):
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            cap.release()
+        cap = _open_camera(self._log)
+        if cap is None:
             self.cap = None
-            self._log("ERROR: เปิดกล้องไม่ได้")
+            self._log("ERROR: เปิดกล้องไม่ได้ — ลองครบทุก backend/device แล้ว")
+            for hint in _CAMERA_HELP:
+                self._log(hint)
             return
         self.cap = cap
         self.running     = True
@@ -823,6 +813,8 @@ class App(ctk.CTk):
             text="■  Stop", fg_color=C_BTN_RUN,
             border_color="#2d5e2d", hover_color="#243324", text_color=C_ON
         )
+        for w in plat.preflight():
+            self._log(f"[warn] {w}")
         det = "MediaPipe" if _HAS_MP else "Haar (fallback)"
         if not _HAS_MP:
             self._log(f"[warn] MediaPipe ใช้ไม่ได้ → {_MP_ERR}")
@@ -835,7 +827,7 @@ class App(ctk.CTk):
         self.status_sub.configure(text=f"กำลังตรวจจับ — {det} · {rec}")
         self.screen_badge_dot.configure(text_color=C_ON)
         self.screen_badge_lbl.configure(text="Screen ON", text_color=C_ON)
-        self._log(f"เริ่มทำงาน — {det} + {rec}")
+        self._log(f"เริ่มทำงาน — {plat.NAME} · {det} + {rec}")
         if self.jiggle_on.get():
             self._sched_on()
         if self.jiggle_off.get():
@@ -873,7 +865,7 @@ class App(ctk.CTk):
             self._overlay.destroy()
             self._overlay = None
         self.screen_off = False
-        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+        plat.release_awake()
         if self.cap:
             self.cap.release()
             self.cap = None
@@ -971,8 +963,7 @@ class App(ctk.CTk):
                 self._wake("ใบหน้า" if face_detected else
                            "เมาส์"  if mouse_moved   else "คีย์บอร์ด")
             else:
-                ctypes.windll.kernel32.SetThreadExecutionState(
-                    ES_CONTINUOUS | ES_DISPLAY_REQUIRED)
+                plat.keep_display_on()
             label = ("พบใบหน้า"        if face_detected else
                      "พบการเคลื่อนไหว" if mouse_moved   else "พบการพิมพ์")
             self.status_dot.configure(text_color=C_ON)
@@ -994,8 +985,7 @@ class App(ctk.CTk):
                 self._sleep()
             else:
                 _reset_idle()
-                ctypes.windll.kernel32.SetThreadExecutionState(
-                    ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
+                plat.keep_system_on()
                 self._heartbeat += 1
                 ticks = max(1, int(60 / self.interval.get()))
                 if self._heartbeat % ticks == 0:
@@ -1041,20 +1031,18 @@ class App(ctk.CTk):
     def _circle_move(self, x, y, radius=10, steps=12):
         """Walk the cursor around a small circle and back — background thread.
 
-        Every step goes through SendInput, not SetCursorPos, so the movement
-        registers as real input and holds off an enforced lock. Pointer
-        acceleration makes relative steps land imprecisely, hence the final
-        SetCursorPos to put the pointer back exactly where it started.
+        Every step goes through plat.move_cursor, which is injected input and
+        holds off an enforced lock; plat.warp_cursor is NOT counted as input on
+        either OS, so the final snap-back is purely cosmetic and cannot undo
+        the reset. Pointer acceleration (Windows) makes the steps land
+        imprecisely, which is why the pointer is put home explicitly.
         """
-        cx, cy = x, y
         for i in range(steps + 1):
-            a  = 2 * math.pi * i / steps
-            tx = x + int(radius * math.cos(a))
-            ty = y + int(radius * math.sin(a))
-            _send_move(tx - cx, ty - cy)
-            cx, cy = tx, ty
+            a = 2 * math.pi * i / steps
+            plat.move_cursor(x + int(radius * math.cos(a)),
+                             y + int(radius * math.sin(a)))
             time.sleep(0.03)
-        ctypes.windll.user32.SetCursorPos(x, y)
+        plat.warp_cursor(x, y)
         time.sleep(0.03)
 
     def _sched(self, attr_id, attr_var, attr_sec, callback, label):
@@ -1149,8 +1137,7 @@ class App(ctk.CTk):
         if self._overlay:
             self._overlay.destroy()
             self._overlay = None
-        ctypes.windll.kernel32.SetThreadExecutionState(
-            ES_CONTINUOUS | ES_DISPLAY_REQUIRED)
+        plat.keep_display_on()
         self._mouse_pos = _cursor_pos()
         self.screen_off = False
         self._heartbeat = 0
@@ -1203,7 +1190,7 @@ class App(ctk.CTk):
                 pass
             self._overlay = None
         self.screen_off = False
-        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+        plat.release_awake()
 
         # Release camera + tray in background so UI doesn't freeze
         cap  = self.cap

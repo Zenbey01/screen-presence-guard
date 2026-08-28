@@ -2,18 +2,25 @@
 
 ## What it does
 Webcam-based face detection app that keeps the screen "on" when the user is present.
-- No face detected for N seconds → black overlay (`_BlackOverlay`) covers screen — looks off, but Windows never locks
+- No face detected for N seconds → black overlay (`_BlackOverlay`) covers screen — looks off, but the OS never locks
+- Runs on **Windows and macOS** — every OS call goes through `spgplatform/` (see below)
 - Face / mouse / keyboard detected → overlay disappears instantly, no password needed
 - Optional mouse circle jiggle (two independent: screen-ON and screen-OFF) to prevent IT-enforced lock
 
 ## File structure
 ```
 screen-presence-guard/
-├── main.py                          # entire app (~1095 lines)
+├── main.py                          # the app — GUI + logic, NO direct OS calls
+├── spgplatform/                     # the only place ctypes lives
+│   ├── __init__.py                  #   picks a backend by sys.platform
+│   ├── _win.py                      #   Win32: user32 / kernel32
+│   └── _mac.py                      #   CoreGraphics / IOKit (no pyobjc)
 ├── blaze_face_short_range.tflite    # MediaPipe face detector model (230KB, committed)
-├── icon.ico                         # app icon (person in blue frame)
+├── icon.ico                         # app icon, Windows (person in blue frame)
+├── icon.icns                        # same icon, macOS bundle
 ├── make_icon.py                     # regenerate icon.ico
-├── build.ps1                        # PyInstaller build → dist/ + zip + installer bat
+├── build.ps1                        # Windows build → dist/ + zip + installer bat
+├── build.sh                         # macOS build  → ScreenPresenceGuard.app + zip
 ├── create_shortcut.ps1              # dev-machine launcher + Desktop shortcut (run once)
 ├── launch.vbs                       # windowless python launcher
 ├── Screen Presence Guard.lnk        # launcher shortcut in project folder
@@ -23,7 +30,8 @@ screen-presence-guard/
 ├── face_model.yml                   # LBPH face model (gitignored)
 ├── face_imgs.pkl                    # training images pool (gitignored)
 ├── dist/ScreenPresenceGuard/        # PyInstaller build (gitignored)
-└── ScreenPresenceGuard.zip          # ready-to-share archive (gitignored)
+├── ScreenPresenceGuard.zip           # ready-to-share archive, Windows (gitignored)
+└── ScreenPresenceGuard-macOS.zip     # ready-to-share archive, macOS (gitignored)
 ```
 
 ## Key architecture
@@ -56,14 +64,33 @@ Keyboard is a wake trigger and presence signal; `_handle_presence` sees face + m
 The wake trigger and status label are picked in that same priority order
 (face / mouse / keyboard) — keep the three branches in sync when adding a source.
 
+### Opening the camera
+`_start` goes through `_open_camera(log)`, never `cv2.VideoCapture(0)` directly.
+It walks `_camera_backends()` (Windows: DirectShow then MSMF then default;
+macOS: AVFoundation; Linux: V4L2) crossed with device index `0..CAM_MAX_INDEX`,
+and accepts a capture only after a real `read()` returns a frame.
+
+Both halves matter and both were real failures:
+- **MSMF is the OpenCV default on Windows and it does not work everywhere.**
+  It reports `isOpened() == False` on plenty of integrated webcams, or reports
+  True and then never grabs. DirectShow opens the same camera fine.
+- **Device 0 is not always the webcam** — a dock, a virtual cam (OBS, Teams
+  background app) or a second USB camera pushes the built-in one to index 1/2.
+
+The build is `--windowed`, so OpenCV's own stderr diagnosis goes nowhere. The
+per-attempt `_log` lines are the only evidence a user can send back, and the
+failure path prints the two causes worth checking by hand (the Windows camera
+privacy toggles, and another app holding the device).
+
 `_tick` must handle `cap.read()` returning `ok=False`. After `CAMERA_FAIL_SEC` of
 dead frames it logs and calls `_stop()`: presence checking is impossible without
 frames, and the previous silent no-op left the app looking alive while it had
 stopped deciding anything. There is no auto-resume — the user presses Start again.
 
 ### Face registration
-Storage lives in `_DATA_DIR`: the repo dir in dev, `%LOCALAPPDATA%\ScreenPresenceGuard`
-when frozen, because a bundle installed under Program Files cannot write to itself.
+Storage lives in `_DATA_DIR`: the repo dir in dev, `plat.data_dir()` when frozen
+(`%LOCALAPPDATA%\ScreenPresenceGuard` / `~/Library/Application Support/ScreenPresenceGuard`),
+because a bundle under Program Files — or a signed `.app` — cannot write to itself.
 `_finish_register` does `os.makedirs(_DATA_DIR, exist_ok=True)` inside its try.
 
 - 40 sample frames (`REG_SAMPLES`) → LBPH train → saves `face_model.yml` + `face_imgs.pkl`
@@ -136,33 +163,67 @@ def _wake(trigger):   # destroy overlay, update widgets (guard: if not screen_of
   releases camera + stops tray in **daemon thread** (non-blocking), destroys window after 200ms
 - `_stop()`: same cleanup but keeps window open; also cancels both jiggle timers
 
-### Windows API calls
+### The platform shim — `spgplatform/`
+`main.py` must never import `ctypes` or call an OS API directly. It does
+`import spgplatform as plat` and gets whichever backend matches the host; both
+export the same names with the same meaning:
+
 ```python
-ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED  # prevent sleep
-SendInput(MOUSEEVENTF_MOVE)    # _send_move — the ONLY way to reset the idle timer
-GetAsyncKeyState(vk)           # _any_key_pressed — keyboard wake, no focus needed
-GetSystemMetrics(76/77/78/79)  # virtual screen coords for multi-monitor overlay
-SetCursorPos(x, y)             # cosmetic snap-back only, see below
+plat.NAME               # "windows" | "macos"
+plat.data_dir()         # writable per-user dir for the face model
+plat.keep_display_on()  # user present            → display stays powered
+plat.keep_system_on()   # overlay dark            → display + system stay awake
+plat.release_awake()    # drop every keep-awake request
+plat.reset_idle()       # reset the input-idle timer, pointer ends where it started
+plat.move_cursor(x, y)  # absolute move that COUNTS as input (jiggle step)
+plat.warp_cursor(x, y)  # absolute move that does NOT count (cosmetic snap-back)
+plat.cursor_pos()       # -> (x, y)
+plat.idle_ms()          # -> ms since the last real input
+plat.any_key_pressed()  # -> True on a key going down since the last call
+plat.virtual_screen()   # -> (x, y, w, h) spanning every monitor
+plat.preflight()        # -> [str] missing-permission warnings, logged by _start()
 ```
 
-**Idle timer — read this before touching the jiggle.** Two Win32 traps, both
-measured on Win11:
+`main.py` keeps four module-level aliases (`_reset_idle`, `_cursor_pos`,
+`_idle_ms`, `_any_key_pressed`) so the call sites read as before.
 
-| Call | Reality |
-|---|---|
-| `SetLastInputInfo` | **Not exported by user32 at all.** Documented on MSDN, absent in practice — the old `_reset_idle()` raised `AttributeError` on every single call for months. |
-| `SetCursorPos` | Moves the pointer but Windows does **not** count it as input. Idle timer went 7125ms → 7203ms across a call. Cannot hold off a lock. |
-| `SendInput` | Actually resets it: 7203ms → 78ms. A `(0, 0)` relative move is a no-op that still registers, which is what `_reset_idle()` uses. |
+**Idle timer — read this before touching the jiggle.** Each OS has a call that
+looks like the right one and silently is not. Every row below was measured, not
+read off a doc page:
+
+| OS | Call | Reality |
+|---|---|---|
+| Win11 | `SetLastInputInfo` | **Not exported by user32 at all.** Documented on MSDN, absent in practice — the old `_reset_idle()` raised `AttributeError` on every single call for months. |
+| Win11 | `SetCursorPos` | Moves the pointer, Windows does **not** count it as input. Idle went 7125ms → 7203ms. Cannot hold off a lock. |
+| Win11 | `SendInput` | Actually resets it: 7203ms → 78ms. A `(0, 0)` relative move is a visual no-op that still registers — what `reset_idle()` uses. |
+| macOS 15 | `CGWarpMouseCursorPosition` | Moves the pointer, idle **unchanged** (42.44s → 42.44s). The `SetCursorPos` trap, mirrored. Perfect for the snap-back. |
+| macOS 15 | `IOPMAssertionDeclareUserActivity` | Returns success and does **not** move the HID idle clock. Defers *display sleep*, not the lock countdown. |
+| macOS 15 | `CGEventPost` at the **same** point | Silently coalesced away — idle kept counting, 45.45s → 45.58s. |
+| macOS 15 | `CGEventPost` that **displaces** the pointer | Actually resets it: 17.62s → 0.19s, on all three counters (combined, HID-state, `ioreg` HIDIdleTime). |
+
+Consequence: `reset_idle()` cannot be invisible on macOS the way `SendInput(0,0)`
+is on Windows. `_mac.reset_idle()` steps 1px and warps straight back; the warp
+does not undo the reset because warping is not input.
 
 `_INPUT`'s union must be sized for `_MOUSEINPUT` (`sizeof(_INPUT) == 40` on x64).
 A union holding only `KEYBDINPUT` yields 32 bytes and `SendInput` silently
 returns **0** without injecting anything.
 
-`_idle_ms()` (via `GetLastInputInfo`, which *is* exported) is logged around every
-jiggle and on the dark heartbeat: `idle before 34s -> idle after 0ms`. Keep it.
-The overlay is created with `cursor="none"`, so a moving pointer cannot be
-observed while the screen is dark — the log is the only way a user can tell the
-jiggle fired at all, and the idle pair is the only proof Windows accepted it.
+`_idle_ms()` is logged around every jiggle and on the dark heartbeat:
+`idle before 34s -> idle after 0ms`. Keep it. The overlay is created with
+`cursor="none"`, so a moving pointer cannot be observed while the screen is
+dark — the log is the only way a user can tell the jiggle fired at all, and the
+idle pair is the only proof the OS accepted it.
+
+**macOS permissions fail silently, so `preflight()` exists.** Without
+**Accessibility**, `CGEventPost` is dropped and the jiggle plus the idle reset
+do nothing at all. Without **Input Monitoring**, `CGEventSourceKeyState` always
+reports False and keyboard wake never fires (mouse wake still works). Neither
+raises; `_start()` logs `plat.preflight()` so it is never diagnosed by guesswork.
+
+`CGEventSourceKeyState` is a *level* read with no "changed since last call" bit
+like `GetAsyncKeyState`'s `0x0001`. `_mac.any_key_pressed()` reconstructs the
+rising edge against a stored set so both OSes have identical semantics.
 
 ## Color palette (dark navy/blue)
 ```python
@@ -219,6 +280,12 @@ pystray                 # system tray icon
 `numpy` is used directly but comes in transitively via opencv/mediapipe.
 
 ## Distribution
+Two bundles, one Release. `.github/workflows/build.yml` runs a `windows` job and
+a `macos` job on every `demo-*` / `v*` tag; each verifies MediaPipe loads,
+verifies `spgplatform` imports on that OS, builds, and uploads its asset. Both
+jobs create the Release if it is missing and tolerate losing that race.
+
+### Windows — `.\build.ps1`
 - Build: `.\build.ps1` → `dist/ScreenPresenceGuard/` → `ScreenPresenceGuard.zip`
 - `build.ps1` must `--add-data` **both** `icon.ico` and `blaze_face_short_range.tflite`;
   they land in `_internal/`, which is what `_DIR` resolves to when frozen
@@ -228,7 +295,20 @@ pystray                 # system tray icon
   `_internal/blaze_face_short_range.tflite` exist and exits 1 if any is missing,
   so a bundle can never ship without the face model again
 - Recipients: extract zip → run the installer bat → double-click Desktop shortcut
-- No Python required on target machine (PyInstaller --onedir bundle)
+
+### macOS — `./build.sh`
+- Build: `./build.sh` → `dist/ScreenPresenceGuard.app` → `ScreenPresenceGuard-macOS.zip`
+- `--add-data` separator is **`:`**, not the `;` Windows wants
+- Info.plist **must** carry `NSCameraUsageDescription` — without it macOS denies
+  the camera *silently*, which looks exactly like the MSMF bug above
+- Packed with `ditto -c -k --keepParent`, never `zip`: plain zip drops the
+  symlinks inside `Contents/Frameworks` and the bundle will not launch
+- Signed **ad-hoc** (`codesign -s -`), so Gatekeeper still needs right-click →
+  Open the first time, and the signature changes every build, which makes macOS
+  re-ask for camera / accessibility after each new download
+- `_DIR` resolves to `Contents/Frameworks` when frozen (PyInstaller `sys._MEIPASS`)
+
+No Python required on either target machine (PyInstaller --onedir bundle).
 
 ## Known issues / gotchas
 - `main.py` is saved with a **UTF-8 BOM** — read it as `utf-8-sig` when scripting edits
@@ -240,7 +320,7 @@ pystray                 # system tray icon
 - `_log` trims the textbox to `MAX_LOG_LINES`; it settles one line over the cap,
   which is intended — the point is the bound, not an exact count
 - face_model.yml / face_imgs.pkl are personal — exclude from shared distribution
-- Frozen builds store face_model.yml / face_imgs.pkl in `%LOCALAPPDATA%\ScreenPresenceGuard`
+- Frozen builds store face_model.yml / face_imgs.pkl in `plat.data_dir()`
 - Desktop shortcut: recreate via `create_shortcut.ps1` if Python path changes
 - Never swallow a dependency-init exception silently (see `_MP_ERR`) — a dead MediaPipe
   fell back to Haar unnoticed for two months
@@ -249,3 +329,11 @@ pystray                 # system tray icon
   Tests that drive the app with `update()` in a loop instead will see the worker die
   on `RuntimeError: main thread is not in main loop` — a test artifact, not a bug.
 - Settings tab lives in a `CTkScrollableFrame`; adding rows just extends the scroll
+- Anything new that touches the OS goes in `spgplatform/`, **both** backends, or
+  the app breaks on the platform you did not test
+- macOS overlay covers the display Tk put the window on, not the whole virtual
+  screen — `plat.virtual_screen()` reports the union correctly, but Tk/Aqua will
+  not span it. Multi-monitor macOS leaves the other screens lit; unresolved.
+- The Homebrew `cv2` build has no `cv2.data` submodule, which `main.py` reads at
+  import. The pip `opencv-contrib-python` wheel the app ships does have it —
+  only a dev-machine trap.

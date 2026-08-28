@@ -14,6 +14,7 @@ pyinstaller `
   --collect-all customtkinter `
   --collect-all cv2 `
   --hidden-import pystray `
+  --hidden-import spgplatform._win `
   --hidden-import PIL._tkinter_finder `
   "main.py"
 

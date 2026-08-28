@@ -1,0 +1,80 @@
+name: Build Windows release
+
+# Push a tag and GitHub builds the exe itself, then attaches the zip to the
+# matching Release. Recipients download one file, extract, double-click.
+# The zip is ~140MB, over GitHub's 100MiB per-file limit for the repo itself,
+# so a Release asset is the only way to ship it.
+#
+# No PowerShell here-strings anywhere below: `'@` / `"@` must sit at column 0,
+# which YAML block indentation makes impossible. Hence --notes-file and the
+# single-line python check.
+on:
+  push:
+    tags:
+      - "demo-*"
+      - "v*"
+  workflow_dispatch:          # rebuild a tag from the Actions tab
+
+permissions:
+  contents: write             # create the Release and upload the asset
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      # Fail in 30s rather than after a 5-minute build: mediapipe removed the
+      # legacy mp.solutions namespace, and a broken detector used to fall back
+      # to Haar silently.
+      - name: Verify MediaPipe Tasks API loads the face model
+        run: python -c "import mediapipe, os; from mediapipe.tasks.python import vision; from mediapipe.tasks.python.core.base_options import BaseOptions as B; m='blaze_face_short_range.tflite'; assert os.path.exists(m), 'face model missing from repo'; vision.FaceDetector.create_from_options(vision.FaceDetectorOptions(base_options=B(model_asset_path=m), running_mode=vision.RunningMode.IMAGE)); print('mediapipe', mediapipe.__version__, 'Tasks API OK')"
+
+      # build.ps1 is the single source of truth for the PyInstaller flags, and it
+      # already exits 1 if the bundle is missing icon.ico or the face model.
+      - name: Build
+        run: .\build.ps1
+
+      - name: Report artifact
+        run: |
+          $z = Get-Item ScreenPresenceGuard.zip
+          Write-Host ("zip: {0:N1} MB" -f ($z.Length / 1MB))
+          Get-ChildItem dist\ScreenPresenceGuard
+
+      - name: Attach zip to the Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Actions runs pwsh with $ErrorActionPreference='stop', and PS 7.4+
+          # turns a non-zero native exit into a terminating error. Probing for an
+          # existing release would abort the step, so relax it and check by hand.
+          $ErrorActionPreference = 'Continue'
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title $tag --notes-file .github/RELEASE_NOTES.md
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+          }
+          gh release upload $tag ScreenPresenceGuard.zip --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }
+
+      # untagged runs still leave something downloadable, for testing the workflow
+      - name: Upload as workflow artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenPresenceGuard
+          path: ScreenPresenceGuard.zip
+          retention-days: 14

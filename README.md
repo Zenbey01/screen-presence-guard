@@ -14,14 +14,39 @@
 - ไม่เจอหน้าครบ N วินาที → overlay ดำคลุมจอ
 - กลับมา / ขยับเมาส์ / กดคีย์ → overlay หายทันที
 
-## ติดตั้งและรัน
+## ดาวน์โหลด (ไม่ต้องมี Python)
+
+โหลด `ScreenPresenceGuard.zip` จากหน้า
+[**Releases**](https://github.com/Zenbey01/screen-presence-guard/releases/latest)
+→ แตกไฟล์ → ดับเบิลคลิก `ScreenPresenceGuard.exe`
+
+อยากได้ shortcut บน Desktop ให้รัน `ติดตั้ง shortcut.bat` ในโฟลเดอร์ที่แตกออกมา
+
+ครั้งแรก Windows อาจขื้น *"Windows protected your PC"* เพราะไฟล์ไม่ได้เซ็น
+ให้กด **More info** → **Run anyway** — ไฟล์นี้บิ้วโดย GitHub Actions
+จากสอร์สใน repo นี้ ตรวจขั้นตอนได้ที่แท็บ Actions
+
+## รองรับเฉพาะ Windows
+
+**macOS กับ Linux ใช้ไม่ได้** — กลไกหลักทั้งหมดเรียก Win32 API ตรง ๆ
+ผ่าน `ctypes.windll` ซึ่งไม่มีอยู่บน OS อื่นเลย:
+
+| หน้าที่ | Win32 API |
+|---|---|
+| กันจอดับ / กัน sleep | `SetThreadExecutionState` |
+| reset idle timer + ขยับเมาส์ | `SendInput`, `SetCursorPos`, `GetCursorPos` |
+| อ่านค่า idle | `GetLastInputInfo`, `GetTickCount` |
+| ตรวจคีย์บอร์ด | `GetAsyncKeyState` |
+| ขอบจอหลายจอ | `GetSystemMetrics(76-79)` |
+
+นอกจากนี้ exe ของ PyInstaller ผูกกับ OS ที่บิ้ว รันข้ามเครื่องไม่ได้
+
+## รันจากสอร์ส (สำหรับนักพัฒนา)
 
 ```bash
 pip install -r requirements.txt
 python main.py
 ```
-
-ใช้ได้บน **Windows เท่านั้น** (เรียก Win32 API ผ่าน `ctypes` โดยตรง)
 
 ## การใช้งาน
 

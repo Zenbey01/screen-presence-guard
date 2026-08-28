@@ -11,3 +11,6 @@ __pycache__/
 # Personal face training data
 /face_model.yml
 /face_imgs.pkl
+
+# Extracted ready-to-run release (recreated by build.ps1 + manual extract)
+/ScreenPresenceGuard-Demo0.5/

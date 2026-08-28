@@ -18,6 +18,18 @@ pyinstaller `
   "main.py"
 
 if (Test-Path "dist\ScreenPresenceGuard") {
+    $bundle = "dist\ScreenPresenceGuard"
+    $required = @(
+        "$bundle\ScreenPresenceGuard.exe",
+        "$bundle\_internal\icon.ico",
+        "$bundle\_internal\blaze_face_short_range.tflite"
+    )
+    $missing = $required | Where-Object { -not (Test-Path $_) }
+    if ($missing) {
+        Write-Host "Build FAILED — missing bundle files:" -ForegroundColor Red
+        $missing | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        exit 1
+    }
     Write-Host "`nBuild OK! — dist\ScreenPresenceGuard\" -ForegroundColor Green
 
     # Create installer bat

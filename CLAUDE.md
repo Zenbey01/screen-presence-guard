@@ -52,15 +52,32 @@ _detect_boxes()    # → [(x, y, w, h)] from det.bounding_box.origin_x/origin_y/
 ```
 **Do not** use the legacy `mp.solutions.face_detection` API — mediapipe >= 0.10.30
 removed the whole `mp.solutions` namespace. Tasks API only.
-Keyboard is a wake trigger only (overlay bindings); `_handle_presence` sees face + mouse.
+Keyboard is a wake trigger and presence signal; `_handle_presence` sees face + mouse + keyboard.
+The wake trigger and status label are picked in that same priority order
+(face / mouse / keyboard) — keep the three branches in sync when adding a source.
+
+`_tick` must handle `cap.read()` returning `ok=False`. After `CAMERA_FAIL_SEC` of
+dead frames it logs and calls `_stop()`: presence checking is impossible without
+frames, and the previous silent no-op left the app looking alive while it had
+stopped deciding anything. There is no auto-resume — the user presses Start again.
 
 ### Face registration
+Storage lives in `_DATA_DIR`: the repo dir in dev, `%LOCALAPPDATA%\ScreenPresenceGuard`
+when frozen, because a bundle installed under Program Files cannot write to itself.
+`_finish_register` does `os.makedirs(_DATA_DIR, exist_ok=True)` inside its try.
+
 - 40 sample frames (`REG_SAMPLES`) → LBPH train → saves `face_model.yml` + `face_imgs.pkl`
 - Re-registering ADDS to existing pool (multiple sessions = more diversity)
 - If no model: any face counts as "present"
 - Cancellable: `reg_btn` toggles to cancel while `_reg_mode` — `_start_register` →
   `_cancel_register`. `_bg_register` / `_finish_register` both bail if `_reg_mode` is False
   (a queued thread must not resurrect a cancelled run). `_reset_reg_btn()` restores the button.
+- `_finish_register` wraps train+write in try/except/finally: the recognizer is adopted
+  only after both files land on disk, and the `finally` always frees `_reg_mode` and
+  resets the button, so a write failure cannot leave it stuck on "cancel".
+- `_load_face_data` records `_face_load_error` instead of `except: pass`; `_start()`
+  logs it. A corrupt model falls all the way back to any-face rather than leaving
+  identity filtering on with a sample count of 0.
 
 ### Mouse circle jiggle (two independent systems)
 ```python
@@ -83,6 +100,10 @@ def _circle_move(x, y, radius=10, steps=12):
 
 # _jiggling flag: prevents overlay from waking when jiggle moves mouse
 ```
+Neither worker touches `last_seen`. `_work_on` used to set it, which meant any
+ON-jiggle interval shorter than the dim timeout reset the countdown forever and
+the screen never dimmed at all. The ON-jiggle range caps at 300s while the
+timeout reaches 900s, so that line could not be made safe — it is gone.
 Both cards are built in the settings tab (`_circle_card(..., "on")` and
 `(..., "off")`); `which` must be exactly `"on"` / `"off"` — `_on_jiggle_toggle`
 treats anything else as "off".
@@ -137,6 +158,12 @@ measured on Win11:
 A union holding only `KEYBDINPUT` yields 32 bytes and `SendInput` silently
 returns **0** without injecting anything.
 
+`_idle_ms()` (via `GetLastInputInfo`, which *is* exported) is logged around every
+jiggle and on the dark heartbeat: `idle before 34s -> idle after 0ms`. Keep it.
+The overlay is created with `cursor="none"`, so a moving pointer cannot be
+observed while the screen is dark — the log is the only way a user can tell the
+jiggle fired at all, and the idle pair is the only proof Windows accepted it.
+
 ## Color palette (dark navy/blue)
 ```python
 C_BG      = "#090c15"   # outer bg / window
@@ -152,6 +179,11 @@ C_OFF     = "#ef4444"   # red (screen off)
 C_TEXT1/2/3, C_DIM, C_VDIM, C_BTN_RUN
 FONT = "Segoe UI"; FONT_MONO = "Consolas"
 ```
+
+Sliders: `ดับจอหลังจาก` is 5s..900s (15 min) with `number_of_steps=179`, i.e. a
+5s grid — `(900-5)/179 == 5.0` exactly. Both the value readout and the range end
+labels go through `_fmt_sec` (`5s` under a minute, `15:00` above), as does the
+countdown chip; a bare second count is unreadable at a 15-minute timeout.
 
 ## Layout (960×610, not resizable)
 ```
@@ -192,6 +224,9 @@ pystray                 # system tray icon
   they land in `_internal/`, which is what `_DIR` resolves to when frozen
 - The generated installer bat points `IconLocation` at the **exe**
   (icon.ico is inside `_internal/`, not next to the exe)
+- `build.ps1` verifies the exe plus `_internal/icon.ico` and
+  `_internal/blaze_face_short_range.tflite` exist and exits 1 if any is missing,
+  so a bundle can never ship without the face model again
 - Recipients: extract zip → run the installer bat → double-click Desktop shortcut
 - No Python required on target machine (PyInstaller --onedir bundle)
 
@@ -202,7 +237,10 @@ pystray                 # system tray icon
 - `_jiggle_on_id` / `_jiggle_off_id`: cancel before re-scheduling to prevent duplicate loops
 - `_wake()` has guard `if not self.screen_off: return` — prevents double-call
 - `_tick()` rebuilds a `CTkImage` every 33 ms; do not add more per-frame allocations
+- `_log` trims the textbox to `MAX_LOG_LINES`; it settles one line over the cap,
+  which is intended — the point is the bound, not an exact count
 - face_model.yml / face_imgs.pkl are personal — exclude from shared distribution
+- Frozen builds store face_model.yml / face_imgs.pkl in `%LOCALAPPDATA%\ScreenPresenceGuard`
 - Desktop shortcut: recreate via `create_shortcut.ps1` if Python path changes
 - Never swallow a dependency-init exception silently (see `_MP_ERR`) — a dead MediaPipe
   fell back to Haar unnoticed for two months

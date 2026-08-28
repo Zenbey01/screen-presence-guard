@@ -9,6 +9,7 @@ import time
 import threading
 import os
 import pickle
+import sys
 import numpy as np
 import customtkinter as ctk
 from PIL import Image, ImageDraw
@@ -26,13 +27,20 @@ ES_SYSTEM_REQUIRED  = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
 
 _DIR            = os.path.dirname(os.path.abspath(__file__))
-FACE_MODEL_FILE = os.path.join(_DIR, "face_model.yml")
-FACE_IMGS_FILE  = os.path.join(_DIR, "face_imgs.pkl")
 FACE_SIZE       = (100, 100)
 LBPH_THRESHOLD  = 90.0
 REG_SAMPLES     = 40
 KEY_POLL_MS     = 120
+CAMERA_FAIL_SEC = 5
+MAX_LOG_LINES   = 1000
 MP_MODEL_FILE   = os.path.join(_DIR, "blaze_face_short_range.tflite")
+
+# Frozen bundles may be installed in read-only locations such as Program Files.
+_DATA_DIR = (os.path.join(os.environ.get("LOCALAPPDATA", _DIR),
+                          "ScreenPresenceGuard")
+             if getattr(sys, "frozen", False) else _DIR)
+FACE_MODEL_FILE = os.path.join(_DATA_DIR, "face_model.yml")
+FACE_IMGS_FILE  = os.path.join(_DATA_DIR, "face_imgs.pkl")
 
 # MediaPipe drives every presence decision. Haar cascade below is preview-only
 # fallback: too many false negatives (glasses, tilted head) to dim the screen on.
@@ -74,6 +82,13 @@ C_VDIM    = "#3a4460"   # very dim
 C_BTN_RUN = "#1e2a1e"   # stop button bg
 FONT      = "Segoe UI"
 FONT_MONO = "Consolas"
+
+
+def _fmt_sec(v) -> str:
+    """5 -> 5s, 900 -> 15:00. The dim timeout spans seconds to a quarter hour,
+    so a bare second count stops being readable past a minute."""
+    v = int(v)
+    return f"{v}s" if v < 60 else f"{v // 60}:{v % 60:02d}"
 
 
 class _POINT(ctypes.Structure):
@@ -122,6 +137,24 @@ def _any_key_pressed() -> bool:
     """
     gaks = ctypes.windll.user32.GetAsyncKeyState
     return any(gaks(vk) & 0x0001 for vk in range(0x08, 0xFF))
+
+
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong)]
+
+
+def _idle_ms() -> int:
+    """How long Windows thinks the machine has been idle.
+
+    GetLastInputInfo does exist (unlike SetLastInputInfo) and is the value a
+    standard enforced-lock policy watches. Logged around the jiggle so the user
+    can confirm the injection landed: the overlay hides the cursor, so a moving
+    pointer is impossible to observe while the screen is dark.
+    """
+    li = _LASTINPUTINFO()
+    li.cbSize = ctypes.sizeof(li)
+    ctypes.windll.user32.GetLastInputInfo(ctypes.byref(li))
+    return ctypes.windll.kernel32.GetTickCount() - li.dwTime
 
 
 def _reset_idle():
@@ -202,10 +235,12 @@ class App(ctk.CTk):
         self.cap         = None
         self.tray        = None
         self._bg_busy    = False
+        self._camera_failed_since = None
         self._reg_mode   = False
         self._reg_buffer = []
         self._recognizer = None
         self._known_count = 0
+        self._face_load_error = ""
 
         self.timeout          = ctk.IntVar(value=30)
         self.interval         = ctk.DoubleVar(value=2.0)
@@ -233,12 +268,14 @@ class App(ctk.CTk):
             try:
                 rec = cv2.face.LBPHFaceRecognizer_create()
                 rec.read(FACE_MODEL_FILE)
-                self._recognizer = rec
                 with open(FACE_IMGS_FILE, "rb") as f:
                     imgs, _ = pickle.load(f)
+                self._recognizer = rec
                 self._known_count = len(imgs)
-            except Exception:
-                pass
+            except Exception as e:
+                self._recognizer = None
+                self._known_count = 0
+                self._face_load_error = f"{type(e).__name__}: {e}"
 
     def _face_status_text(self) -> str:
         if not _HAS_LBPH:
@@ -423,8 +460,9 @@ class App(ctk.CTk):
         sf.grid_columnconfigure(0, weight=1)
         self._tab_frames["settings"] = sf
 
-        self._add_slider_v(sf, 0, "ดับจอหลังจาก", self.timeout,  5, 120,
-                           lambda v: f"{int(v)}s")
+        # 5s .. 15min in 5s steps: (900-5)/179 == 5.0 exactly
+        self._add_slider_v(sf, 0, "ดับจอหลังจาก", self.timeout,  5, 900,
+                           _fmt_sec, steps=179)
         self._add_slider_v(sf, 1, "ตรวจสอบทุก",   self.interval, 1, 10,
                            lambda v: f"{v:.1f}s")
 
@@ -540,7 +578,7 @@ class App(ctk.CTk):
         for k, btn in self._tab_btns.items():
             btn.configure(text_color=C_ACCENT if k == key else C_DIM)
 
-    def _add_slider_v(self, parent, row, label, var, lo, hi, fmt):
+    def _add_slider_v(self, parent, row, label, var, lo, hi, fmt, steps=None):
         """Vertical slider block matching prototype."""
         blk = ctk.CTkFrame(parent, fg_color="transparent")
         blk.grid(row=row, column=0, sticky="ew", pady=(0, 22))
@@ -555,16 +593,16 @@ class App(ctk.CTk):
                             font=ctk.CTkFont(family=FONT, size=17, weight="bold"),
                             text_color=C_ACCENT)
         val.pack(side="right")
-        ctk.CTkSlider(blk, from_=lo, to=hi, variable=var,
+        ctk.CTkSlider(blk, from_=lo, to=hi, variable=var, number_of_steps=steps,
                        fg_color=C_CARD, progress_color=C_ACCENT,
                        button_color=C_ACCENT, button_hover_color="#60a5fa",
                        height=14).pack(fill="x", pady=(10, 4))
         rng = ctk.CTkFrame(blk, fg_color="transparent")
         rng.pack(fill="x")
-        ctk.CTkLabel(rng, text=f"{lo}s",
+        ctk.CTkLabel(rng, text=fmt(lo),
                       font=ctk.CTkFont(family=FONT, size=11),
                       text_color=C_VDIM).pack(side="left")
-        ctk.CTkLabel(rng, text=f"{hi}s",
+        ctk.CTkLabel(rng, text=fmt(hi),
                       font=ctk.CTkFont(family=FONT, size=11),
                       text_color=C_VDIM).pack(side="right")
         var.trace_add("write", lambda *_: val.configure(text=fmt(var.get())))
@@ -719,31 +757,36 @@ class App(ctk.CTk):
                     if count >= REG_SAMPLES:
                         self.after(0, self._finish_register)
         except Exception as e:
-            self.after(0, lambda: self._log(f"[warn] register: {e}"))
+            self.after(0, lambda err=e: self._log(f"[warn] register: {err}"))
         finally:
             self._bg_busy = False
 
     def _finish_register(self):
         if not self._reg_mode:
             return
-        existing_imgs, existing_labels = [], []
-        if os.path.exists(FACE_IMGS_FILE):
-            with open(FACE_IMGS_FILE, "rb") as f:
-                existing_imgs, existing_labels = pickle.load(f)
-        all_imgs   = existing_imgs + self._reg_buffer
-        all_labels = existing_labels + [0] * len(self._reg_buffer)
-        rec = cv2.face.LBPHFaceRecognizer_create()
-        rec.train(all_imgs, np.array(all_labels, dtype=np.int32))
-        rec.write(FACE_MODEL_FILE)
-        self._recognizer = rec
-        with open(FACE_IMGS_FILE, "wb") as f:
-            pickle.dump((all_imgs, all_labels), f)
-        self._known_count = len(all_imgs)
-        self._reg_mode    = False
-        self._reg_buffer  = []
-        self._log(f"ลงทะเบียนสำเร็จ! รวม {self._known_count} ตัวอย่าง")
-        self._reset_reg_btn()
-        self.face_count_lbl.configure(text=str(self._known_count))
+        try:
+            os.makedirs(_DATA_DIR, exist_ok=True)
+            existing_imgs, existing_labels = [], []
+            if os.path.exists(FACE_IMGS_FILE):
+                with open(FACE_IMGS_FILE, "rb") as f:
+                    existing_imgs, existing_labels = pickle.load(f)
+            all_imgs   = existing_imgs + self._reg_buffer
+            all_labels = existing_labels + [0] * len(self._reg_buffer)
+            rec = cv2.face.LBPHFaceRecognizer_create()
+            rec.train(all_imgs, np.array(all_labels, dtype=np.int32))
+            rec.write(FACE_MODEL_FILE)
+            with open(FACE_IMGS_FILE, "wb") as f:
+                pickle.dump((all_imgs, all_labels), f)
+            self._recognizer = rec
+            self._known_count = len(all_imgs)
+            self._log(f"ลงทะเบียนสำเร็จ! รวม {self._known_count} ตัวอย่าง")
+        except Exception as e:
+            self._log(f"ERROR: บันทึกข้อมูลหน้าไม่สำเร็จ — {type(e).__name__}: {e}")
+        finally:
+            self._reg_mode   = False
+            self._reg_buffer = []
+            self._reset_reg_btn()
+            self.face_count_lbl.configure(text=str(self._known_count))
 
     def _clear_face_data(self):
         self._recognizer  = None
@@ -760,15 +803,19 @@ class App(ctk.CTk):
         (self._stop if self.running else self._start)()
 
     def _start(self):
-        self.cap = cv2.VideoCapture(0)
-        if not self.cap.isOpened():
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            cap.release()
+            self.cap = None
             self._log("ERROR: เปิดกล้องไม่ได้")
             return
+        self.cap = cap
         self.running     = True
         self.screen_off  = False
         self.last_seen   = time.time()
         self._last_check = 0.0
         self._heartbeat  = 0
+        self._camera_failed_since = None
         self._bg_busy    = False
         self._reg_mode   = False
         self._mouse_pos  = _cursor_pos()
@@ -781,6 +828,8 @@ class App(ctk.CTk):
             self._log(f"[warn] MediaPipe ใช้ไม่ได้ → {_MP_ERR}")
             self._log("[warn] ใช้ Haar แทน — ความแม่นยำต่ำกว่า (แว่น/หันหน้า)")
         rec = f"LBPH ({self._known_count} ตย.)" if self._recognizer else "any-face"
+        if self._face_load_error:
+            self._log(f"[warn] โหลด face model ไม่สำเร็จ → {self._face_load_error}")
         self.status_dot.configure(text_color=C_ON)
         self.status_label.configure(text="ตรวจพบใบหน้า", text_color=C_ON)
         self.status_sub.configure(text=f"กำลังตรวจจับ — {det} · {rec}")
@@ -815,6 +864,7 @@ class App(ctk.CTk):
 
     def _stop(self):
         self.running   = False
+        self._camera_failed_since = None
         self._reg_mode = False
         self._cancel_jiggle_on()
         self._cancel_jiggle_off()
@@ -864,12 +914,19 @@ class App(ctk.CTk):
                 self.cam_label.configure(image=img, text="")
                 self.cam_label.image = img
 
+                self._camera_failed_since = None
                 now = time.time()
                 if now - self._last_check >= self.interval.get() and not self._bg_busy:
                     self._last_check = now
                     self._bg_busy    = True
                     tgt = self._bg_register if self._reg_mode else self._bg_check
                     threading.Thread(target=tgt, args=(frame.copy(),), daemon=True).start()
+            else:
+                if self._camera_failed_since is None:
+                    self._camera_failed_since = time.time()
+                elif time.time() - self._camera_failed_since >= CAMERA_FAIL_SEC:
+                    self._log(f"ERROR: กล้องไม่ส่งภาพต่อเนื่องเกิน {CAMERA_FAIL_SEC} วินาที")
+                    self._stop()
         except Exception as e:
             self._log(f"[warn] tick: {e}")
         self.after(33, self._tick)
@@ -879,7 +936,7 @@ class App(ctk.CTk):
             face_detected = self._check_my_face(frame)
             self.after(0, lambda: self._handle_presence(face_detected))
         except Exception as e:
-            self.after(0, lambda: self._log(f"[warn] check: {e}"))
+            self.after(0, lambda err=e: self._log(f"[warn] check: {err}"))
         finally:
             self._bg_busy = False
 
@@ -903,18 +960,21 @@ class App(ctk.CTk):
     def _handle_presence(self, face_detected: bool):
         pos = _cursor_pos()
         mouse_moved = self.use_mouse.get() and not self._jiggling and (pos != self._mouse_pos)
+        key_hit = self.use_keyboard.get() and _any_key_pressed()
         if pos != self._mouse_pos:
             self._mouse_pos = pos   # always track pos, only trigger if enabled
-        user_present = face_detected or mouse_moved
+        user_present = face_detected or mouse_moved or key_hit
 
         if user_present:
             self.last_seen = time.time()
             if self.screen_off:
-                self._wake("ใบหน้า" if face_detected else "เมาส์")
+                self._wake("ใบหน้า" if face_detected else
+                           "เมาส์"  if mouse_moved   else "คีย์บอร์ด")
             else:
                 ctypes.windll.kernel32.SetThreadExecutionState(
                     ES_CONTINUOUS | ES_DISPLAY_REQUIRED)
-            label = "พบใบหน้า" if face_detected else "พบการเคลื่อนไหว"
+            label = ("พบใบหน้า"        if face_detected else
+                     "พบการเคลื่อนไหว" if mouse_moved   else "พบการพิมพ์")
             self.status_dot.configure(text_color=C_ON)
             self.status_label.configure(text=label, text_color=C_ON)
             self.status_sub.configure(text="กำลังตรวจจับ — จอเปิดอยู่")
@@ -927,9 +987,9 @@ class App(ctk.CTk):
             if remaining > 0:
                 self.status_dot.configure(text_color=C_WARN)
                 self.status_label.configure(text="ไม่พบใบหน้า", text_color=C_WARN)
-                self.status_sub.configure(text=f"ดับจอใน {int(remaining)} วินาที")
+                self.status_sub.configure(text=f"ดับจอใน {_fmt_sec(remaining)}")
                 self.face_stat.configure(text="ไม่พบ", text_color=C_OFF)
-                self.time_stat.configure(text=f"{int(remaining)}s", text_color=C_WARN)
+                self.time_stat.configure(text=_fmt_sec(remaining), text_color=C_WARN)
             elif not self.screen_off:
                 self._sleep()
             else:
@@ -940,7 +1000,7 @@ class App(ctk.CTk):
                 ticks = max(1, int(60 / self.interval.get()))
                 if self._heartbeat % ticks == 0:
                     mins = (self._heartbeat * int(self.interval.get())) // 60
-                    self._log(f"โปรแกรมทำงาน — จอมืดมา {mins} นาที")
+                    self._log(f"โปรแกรมทำงาน — จอมืดมา {mins} นาที | idle {_idle_ms()//1000}s")
 
     # ── Screen control ────────────────────────────────────────────────────────
 
@@ -1032,14 +1092,15 @@ class App(ctk.CTk):
         self._jiggling = True
         try:
             x, y = _cursor_pos()
-            self.after(0, lambda px=x, py=y:
-                       self._log(f"[jiggle-ON] วงกลมจาก ({px},{py})"))
+            idle_before = _idle_ms()
+            self.after(0, lambda px=x, py=y, ib=idle_before:
+                       self._log(f"[jiggle-ON] วงกลมจาก ({px},{py}) | idle ก่อน {ib//1000}s"))
             self._circle_move(x, y)
             self._mouse_pos = (x, y)
             _reset_idle()
-            self.last_seen = time.time()
-            self.after(0, lambda px=x, py=y:
-                       self._log(f"[jiggle-ON] ✓ เสร็จ ({px},{py})"))
+            idle_after = _idle_ms()
+            self.after(0, lambda px=x, py=y, ia=idle_after:
+                       self._log(f"[jiggle-ON] ✓ เสร็จ ({px},{py}) | idle หลัง {ia}ms"))
         except Exception as e:
             self.after(0, lambda err=e: self._log(f"[jiggle-ON] ERROR: {err}"))
         finally:
@@ -1067,13 +1128,15 @@ class App(ctk.CTk):
         self._jiggling = True
         try:
             x, y = _cursor_pos()
-            self.after(0, lambda px=x, py=y:
-                       self._log(f"[jiggle-OFF] วงกลมจาก ({px},{py})"))
+            idle_before = _idle_ms()
+            self.after(0, lambda px=x, py=y, ib=idle_before:
+                       self._log(f"[jiggle-OFF] วงกลมจาก ({px},{py}) | idle ก่อน {ib//1000}s"))
             self._circle_move(x, y)
             self._mouse_pos = (x, y)
             _reset_idle()
-            self.after(0, lambda px=x, py=y:
-                       self._log(f"[jiggle-OFF] ✓ เสร็จ ({px},{py})"))
+            idle_after = _idle_ms()
+            self.after(0, lambda px=x, py=y, ia=idle_after:
+                       self._log(f"[jiggle-OFF] ✓ เสร็จ ({px},{py}) | idle หลัง {ia}ms"))
         except Exception as e:
             self.after(0, lambda err=e: self._log(f"[jiggle-OFF] ERROR: {err}"))
         finally:
@@ -1122,6 +1185,9 @@ class App(ctk.CTk):
         ts = time.strftime("%H:%M:%S")
         self.log_box.configure(state="normal")
         self.log_box.insert("end", f"[{ts}] {msg}\n")
+        line_count = int(self.log_box.index("end-1c").split(".")[0])
+        if line_count > MAX_LOG_LINES:
+            self.log_box.delete("1.0", f"{line_count - MAX_LOG_LINES}.0")
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
 

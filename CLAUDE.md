@@ -78,16 +78,28 @@ jiggle_off_sec = IntVar(60)
 # so grepping for `jiggle_off_sec` will not show the read site.
 
 def _circle_move(x, y, radius=10, steps=12):
-    # moves cursor in 12-point circle, returns to origin
-    # runs in daemon thread — does NOT block main thread
+    # moves cursor in 12-point circle via _send_move (SendInput), snaps home
+    # with SetCursorPos at the end; runs in daemon thread — does NOT block main
 
 # _jiggling flag: prevents overlay from waking when jiggle moves mouse
 ```
+Both cards are built in the settings tab (`_circle_card(..., "on")` and
+`(..., "off")`); `which` must be exactly `"on"` / `"off"` — `_on_jiggle_toggle`
+treats anything else as "off".
 
 ### Wake triggers (user-configurable)
-- `use_mouse`: mouse movement wakes overlay
-- `use_keyboard`: keypress wakes overlay
+- `use_mouse`: mouse movement wakes overlay — via the `<Motion>` binding **and**
+  `_cursor_pos()` polling in `_handle_presence`
+- `use_keyboard`: keypress wakes overlay — via `_any_key_pressed()` **polling**
+  (`_poll_keyboard`, every `KEY_POLL_MS`, only while `screen_off`)
 - `_jiggling` flag bypasses all wake checks during jiggle
+
+The overlay is `overrideredirect(True)`, so Windows never makes it the foreground
+window. `focus_set()` gives it Tk-internal focus only: while the user sits in
+another app their keystrokes go **there**, and `<KeyPress>` never fires. So the
+keyboard must be polled with `GetAsyncKeyState`, never bound. Do not "fix" this
+by calling `SetForegroundWindow` — that would steal focus and eat keystrokes the
+user meant for their own app.
 
 ### Screen state
 ```python
@@ -106,10 +118,24 @@ def _wake(trigger):   # destroy overlay, update widgets (guard: if not screen_of
 ### Windows API calls
 ```python
 ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED  # prevent sleep
-SetLastInputInfo()   # reset Windows idle timer
+SendInput(MOUSEEVENTF_MOVE)    # _send_move — the ONLY way to reset the idle timer
+GetAsyncKeyState(vk)           # _any_key_pressed — keyboard wake, no focus needed
 GetSystemMetrics(76/77/78/79)  # virtual screen coords for multi-monitor overlay
-SetCursorPos(x, y)  # move mouse (jiggle)
+SetCursorPos(x, y)             # cosmetic snap-back only, see below
 ```
+
+**Idle timer — read this before touching the jiggle.** Two Win32 traps, both
+measured on Win11:
+
+| Call | Reality |
+|---|---|
+| `SetLastInputInfo` | **Not exported by user32 at all.** Documented on MSDN, absent in practice — the old `_reset_idle()` raised `AttributeError` on every single call for months. |
+| `SetCursorPos` | Moves the pointer but Windows does **not** count it as input. Idle timer went 7125ms → 7203ms across a call. Cannot hold off a lock. |
+| `SendInput` | Actually resets it: 7203ms → 78ms. A `(0, 0)` relative move is a no-op that still registers, which is what `_reset_idle()` uses. |
+
+`_INPUT`'s union must be sized for `_MOUSEINPUT` (`sizeof(_INPUT) == 40` on x64).
+A union holding only `KEYBDINPUT` yields 32 bytes and `SendInput` silently
+returns **0** without injecting anything.
 
 ## Color palette (dark navy/blue)
 ```python
@@ -180,3 +206,8 @@ pystray                 # system tray icon
 - Desktop shortcut: recreate via `create_shortcut.ps1` if Python path changes
 - Never swallow a dependency-init exception silently (see `_MP_ERR`) — a dead MediaPipe
   fell back to Haar unnoticed for two months
+- `_work_on` / `_work_off` call `self.after()` from a **worker thread**. That is not
+  documented as safe, and it only works because the main thread sits in `mainloop()`.
+  Tests that drive the app with `update()` in a loop instead will see the worker die
+  on `RuntimeError: main thread is not in main loop` — a test artifact, not a bug.
+- Settings tab lives in a `CTkScrollableFrame`; adding rows just extends the scroll

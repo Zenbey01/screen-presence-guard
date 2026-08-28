@@ -3,6 +3,7 @@
 
 import cv2
 import ctypes
+import math
 import tkinter as tk
 import time
 import threading
@@ -30,6 +31,7 @@ FACE_IMGS_FILE  = os.path.join(_DIR, "face_imgs.pkl")
 FACE_SIZE       = (100, 100)
 LBPH_THRESHOLD  = 90.0
 REG_SAMPLES     = 40
+KEY_POLL_MS     = 120
 MP_MODEL_FILE   = os.path.join(_DIR, "blaze_face_short_range.tflite")
 
 # MediaPipe drives every presence decision. Haar cascade below is preview-only
@@ -78,15 +80,53 @@ class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
-class _LASTINPUTINFO(ctypes.Structure):
-    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong)]
+# SendInput plumbing. SetCursorPos moves the pointer but Windows does NOT
+# count it as user input, so it never resets the idle timer and cannot hold off
+# an enforced lock. Measured on Win11: after SetCursorPos the idle timer stayed
+# at 7125ms -> 7203ms; one SendInput dropped it to 78ms. Also note that
+# SetLastInputInfo (the old approach here) is documented but not exported by
+# user32 at all, so every _reset_idle() call used to raise AttributeError.
+INPUT_MOUSE      = 0
+MOUSEEVENTF_MOVE = 0x0001
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
+                ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+
+class _INPUT(ctypes.Structure):
+    class _U(ctypes.Union):
+        _fields_ = [("mi", _MOUSEINPUT)]
+    _anonymous_ = ("u",)
+    _fields_ = [("type", ctypes.c_ulong), ("u", _U)]
+
+
+def _send_move(dx: int, dy: int):
+    """Inject a relative mouse move. dx=dy=0 is a no-op move that still
+    registers as input, which is what actually resets the idle timer."""
+    inp = _INPUT(type=INPUT_MOUSE,
+                 mi=_MOUSEINPUT(dx, dy, 0, MOUSEEVENTF_MOVE, 0, None))
+    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+
+
+def _any_key_pressed() -> bool:
+    """True if any key went down since the previous call.
+
+    Polled rather than bound: the overlay is overrideredirect(True), so Windows
+    never makes it the foreground window. While the user sits in another app,
+    their keystrokes go there and Tk's <KeyPress> binding never fires.
+    Range starts at 0x08 to skip the mouse buttons (0x01-0x06).
+    """
+    gaks = ctypes.windll.user32.GetAsyncKeyState
+    return any(gaks(vk) & 0x0001 for vk in range(0x08, 0xFF))
 
 
 def _reset_idle():
-    li = _LASTINPUTINFO()
-    li.cbSize = ctypes.sizeof(_LASTINPUTINFO)
-    li.dwTime = ctypes.windll.kernel32.GetTickCount()
-    ctypes.windll.user32.SetLastInputInfo(ctypes.byref(li))
+    """Reset the Windows idle timer without moving the pointer."""
+    _send_move(0, 0)
 
 
 def _cursor_pos() -> tuple[int, int]:
@@ -178,6 +218,7 @@ class App(ctk.CTk):
         self._jiggling        = False
         self._jiggle_on_id    = None
         self._jiggle_off_id   = None
+        self._key_poll_id     = None
 
         self._load_face_data()
         self._build_ui()
@@ -418,6 +459,10 @@ class App(ctk.CTk):
         self._circle_card(sf, 9, "จอเปิด", C_ON, self.jiggle_on,
                           self.jiggle_on_sec, "on")
 
+        # จอดับ card
+        self._circle_card(sf, 10, "จอดับ", C_OFF, self.jiggle_off,
+                          self.jiggle_off_sec, "off")
+
         # ── FACES tab ──────────────────────────────────────────────────────────
         ff = ctk.CTkFrame(content, fg_color="transparent")
         ff.grid(row=0, column=0, sticky="ew")
@@ -549,7 +594,7 @@ class App(ctk.CTk):
         """Compact card for circle jiggle setting."""
         card = ctk.CTkFrame(parent, fg_color=C_CARD, corner_radius=8,
                              border_width=1, border_color=C_BORDER)
-        card.grid(row=row, column=0, sticky="ew")
+        card.grid(row=row, column=0, sticky="ew", pady=(0, 10))
         card.grid_columnconfigure(0, weight=1)
 
         hdr = ctk.CTkFrame(card, fg_color="transparent")
@@ -773,6 +818,7 @@ class App(ctk.CTk):
         self._reg_mode = False
         self._cancel_jiggle_on()
         self._cancel_jiggle_off()
+        self._cancel_key_poll()
         if self._overlay:
             self._overlay.destroy()
             self._overlay = None
@@ -910,18 +956,43 @@ class App(ctk.CTk):
         self.time_stat.configure(text="0s", text_color=C_OFF)
         self.screen_badge_dot.configure(text_color=C_OFF)
         self.screen_badge_lbl.configure(text="Screen OFF", text_color=C_OFF)
+        _any_key_pressed()          # drain keys pressed before the overlay went up
+        self._poll_keyboard()
         self._log("จอมืด — กล้องยังทำงาน ไม่มี lock")
+
+    def _poll_keyboard(self):
+        """Wake on a keypress while the overlay is up. No _jiggling guard is
+        needed: the jiggle injects mouse moves, never keys."""
+        self._key_poll_id = None
+        if not self.screen_off:
+            return
+        if self.use_keyboard.get() and _any_key_pressed():
+            self._wake("คีย์บอร์ด")
+            return
+        self._key_poll_id = self.after(KEY_POLL_MS, self._poll_keyboard)
+
+    def _cancel_key_poll(self):
+        if self._key_poll_id:
+            self.after_cancel(self._key_poll_id)
+            self._key_poll_id = None
 
     # ── Mouse circle jiggle ───────────────────────────────────────────────────
 
     def _circle_move(self, x, y, radius=10, steps=12):
-        """Move cursor in a small circle then return — runs in background thread."""
-        import math
+        """Walk the cursor around a small circle and back — background thread.
+
+        Every step goes through SendInput, not SetCursorPos, so the movement
+        registers as real input and holds off an enforced lock. Pointer
+        acceleration makes relative steps land imprecisely, hence the final
+        SetCursorPos to put the pointer back exactly where it started.
+        """
+        cx, cy = x, y
         for i in range(steps + 1):
-            a = 2 * math.pi * i / steps
-            ctypes.windll.user32.SetCursorPos(
-                x + int(radius * math.cos(a)),
-                y + int(radius * math.sin(a)))
+            a  = 2 * math.pi * i / steps
+            tx = x + int(radius * math.cos(a))
+            ty = y + int(radius * math.sin(a))
+            _send_move(tx - cx, ty - cy)
+            cx, cy = tx, ty
             time.sleep(0.03)
         ctypes.windll.user32.SetCursorPos(x, y)
         time.sleep(0.03)
@@ -1011,6 +1082,7 @@ class App(ctk.CTk):
     def _wake(self, trigger: str = ""):
         if not self.screen_off:
             return
+        self._cancel_key_poll()
         if self._overlay:
             self._overlay.destroy()
             self._overlay = None
@@ -1057,6 +1129,7 @@ class App(ctk.CTk):
         # Stop app state immediately (fast, no blocking)
         self.running   = False
         self._reg_mode = False
+        self._cancel_key_poll()
         if self._overlay:
             try:
                 self._overlay.destroy()

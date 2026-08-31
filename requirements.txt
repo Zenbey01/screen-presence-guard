@@ -1,5 +1,9 @@
-opencv-contrib-python
-mediapipe>=0.10.0
-customtkinter
-Pillow
-pystray
+# Pinned deliberately. Unpinned, CI installed opencv-contrib-python 5.0.0,
+# which no longer ships the Haar cascade XMLs, and the release build went out
+# with face detection dead. These are the versions the app is verified on.
+# To bump: raise one, run the tests, build, and actually open the exe.
+opencv-contrib-python==4.13.0.92
+mediapipe==0.10.35
+customtkinter==5.2.2
+Pillow==12.2.0
+pystray==0.19.5

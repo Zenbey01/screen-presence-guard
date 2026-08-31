@@ -33,7 +33,21 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt pyinstaller pytest
+
+      # tests/run_tests.py runs pytest as a disposable subprocess with a hard
+      # timeout instead of calling pytest directly: every test that loads
+      # main.py creates the MediaPipe FaceDetector at import time, and doing
+      # that inside a pytest process reliably hangs pytest's own shutdown
+      # (reproduced with a single trivial test, on two independent process
+      # launchers, with capture and the anyio plugin both disabled). Every
+      # test's result still prints before that happens, so the wrapper kills
+      # the hung process and passes the run if everything that was collected
+      # reported a pass. timeout-minutes here is a second, outer safety net
+      # in case the wrapper's own timeout logic somehow fails to fire.
+      - name: Test
+        timeout-minutes: 5
+        run: python tests/run_tests.py
 
       # Fail in 30s rather than after a 5-minute build: mediapipe removed the
       # legacy mp.solutions namespace, and a broken detector used to fall back

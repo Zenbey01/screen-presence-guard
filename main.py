@@ -21,6 +21,12 @@ _HAS_LBPH = hasattr(cv2, "face")
 _cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
+# OpenCV 5 dropped the bundled cascade XMLs from the wheel, so this can load
+# empty and detectMultiScale then raises. It only draws preview rectangles, but
+# it used to run first inside _tick's try, so its failure killed the preview AND
+# the MediaPipe presence check behind it -- 30 identical log lines a second and
+# no detection at all. Never let it be load-bearing.
+_HAS_CASCADE = not _cascade.empty()
 
 ES_CONTINUOUS       = 0x80000000
 ES_SYSTEM_REQUIRED  = 0x00000001
@@ -177,6 +183,8 @@ def _detect_boxes(frame) -> list:
         return [(max(0, d.bounding_box.origin_x), max(0, d.bounding_box.origin_y),
                  d.bounding_box.width, d.bounding_box.height)
                 for d in res.detections]
+    if not _HAS_CASCADE:
+        return []          # no MediaPipe and no cascade: nothing can be decided
     gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     faces = _cascade.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
     return faces.tolist() if len(faces) > 0 else []
@@ -236,6 +244,7 @@ class App(ctk.CTk):
         self.tray        = None
         self._bg_busy    = False
         self._camera_failed_since = None
+        self._last_tick_warn      = ""
         self._reg_mode   = False
         self._reg_buffer = []
         self._recognizer = None
@@ -827,6 +836,10 @@ class App(ctk.CTk):
         if not _HAS_MP:
             self._log(f"[warn] MediaPipe ใช้ไม่ได้ → {_MP_ERR}")
             self._log("[warn] ใช้ Haar แทน — ความแม่นยำต่ำกว่า (แว่น/หันหน้า)")
+        if not _HAS_CASCADE:
+            self._log("[warn] โหลด Haar cascade ไม่ได้ — ไม่มีกรอบในภาพพรีวิว")
+            if not _HAS_MP:
+                self._log("ERROR: ไม่มีตัวตรวจใบหน้าที่ใช้ได้เลย — ตรวจไม่ได้")
         rec = f"LBPH ({self._known_count} ตย.)" if self._recognizer else "any-face"
         if self._face_load_error:
             self._log(f"[warn] โหลด face model ไม่สำเร็จ → {self._face_load_error}")
@@ -901,11 +914,13 @@ class App(ctk.CTk):
         try:
             ok, frame = self.cap.read()
             if ok:
-                gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                haar  = _cascade.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
-                prev  = frame.copy()
-                for (x, y, w, h) in haar:
-                    cv2.rectangle(prev, (x, y), (x + w, y + h), (67, 97, 238), 2)
+                prev = frame.copy()
+                if _HAS_CASCADE:        # preview rectangles only, never presence
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    for (x, y, w, h) in _cascade.detectMultiScale(
+                            gray, 1.1, 5, minSize=(80, 80)):
+                        cv2.rectangle(prev, (x, y), (x + w, y + h),
+                                      (67, 97, 238), 2)
                 img = ctk.CTkImage(
                     Image.fromarray(cv2.cvtColor(prev, cv2.COLOR_BGR2RGB)),
                     size=(self.cam_label.winfo_width() or 580,
@@ -928,7 +943,12 @@ class App(ctk.CTk):
                     self._log(f"ERROR: กล้องไม่ส่งภาพต่อเนื่องเกิน {CAMERA_FAIL_SEC} วินาที")
                     self._stop()
         except Exception as e:
-            self._log(f"[warn] tick: {e}")
+            # _tick runs 30x a second; without this a persistent fault fills the
+            # whole log box with one repeated line and buries everything else.
+            msg = f"[warn] tick: {e}"
+            if msg != self._last_tick_warn:
+                self._last_tick_warn = msg
+                self._log(msg)
         self.after(33, self._tick)
 
     def _bg_check(self, frame):

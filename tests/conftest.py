@@ -10,14 +10,49 @@ rather than driving the real mouse. Asserting on a real cursor position fails
 whenever a human happens to move the mouse mid-run, which made every early
 version of these checks unreliable.
 """
+import gc
 import importlib.util
 import os
 import sys
 import time
+import tkinter
 
 import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+APP_BUILD_RETRIES = 5
+
+
+def _resilient_app(App):
+    """Wrap the App class so constructing a root retries on a transient TclError.
+
+    Every test builds a full CustomTkinter App (a Tk root) and destroys it on
+    teardown. Cycling roots in a single interpreter intermittently leaves the
+    next `Tk()` unable to source its own library -- it dies inside
+    `_tkinter.create` with `invalid command name "tcl_findLibrary"` or
+    `couldn't read file ".../ttk/scrollbar.tcl"`, even though the file is there
+    and the very same test passes when run alone. It is not deterministic and
+    not ordering-related: which test trips it moves from run to run, and it can
+    strike between two plain App()+destroy() cycles that start no app threads,
+    so it is CustomTkinter/Tk teardown state, not this app's code.
+
+    It is also transient -- later roots in the same process build fine. So a
+    failed construction is retried after collecting the half-built root and
+    letting Tk settle, which is enough to get a clean interpreter. A genuinely
+    persistent failure still raises after the retries are spent.
+    """
+    def build(*args, **kwargs):
+        last = None
+        for _ in range(APP_BUILD_RETRIES):
+            try:
+                return App(*args, **kwargs)
+            except tkinter.TclError as e:
+                last = e
+                gc.collect()
+                time.sleep(0.15)
+        raise last
+    return build
 
 
 def _load():
@@ -43,7 +78,11 @@ def spg_module():
     cwd = os.getcwd()
     os.chdir(REPO)
     try:
-        yield _load()
+        mod = _load()
+        # Every `spg.App()` -- in this file's fixtures and in tests that build a
+        # root directly -- goes through the retry wrapper. See _resilient_app.
+        mod.App = _resilient_app(mod.App)
+        yield mod
     finally:
         os.chdir(cwd)
 

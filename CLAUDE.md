@@ -10,6 +10,8 @@ Webcam-based face detection app that keeps the screen "on" when the user is pres
 ```
 screen-presence-guard/
 ├── main.py                          # entire app (~1095 lines)
+├── _platform_win.py                 # Windows backend: Win32 via ctypes
+├── _platform_mac.py                 # macOS backend: Quartz/IOKit — WRITTEN, UNVERIFIED (no Mac to test on)
 ├── blaze_face_short_range.tflite    # MediaPipe face detector model (230KB, committed)
 ├── icon.ico                         # app icon (person in blue frame)
 ├── make_icon.py                     # regenerate icon.ico
@@ -136,7 +138,38 @@ def _wake(trigger):   # destroy overlay, update widgets (guard: if not screen_of
   releases camera + stops tray in **daemon thread** (non-blocking), destroys window after 200ms
 - `_stop()`: same cleanup but keeps window open; also cancels both jiggle timers
 
-### Windows API calls
+### Platform backend
+
+`main.py` has zero direct Win32/Quartz calls. Every OS touchpoint goes through
+seven bare-name functions dispatched at the top of `main.py` by `sys.platform`:
+`_cursor_pos`, `_any_key_pressed`, `_send_move`, `_set_cursor_pos`,
+`_reset_idle`, `_idle_ms`, `_prevent_sleep(mode)`, `_overlay_bounds()`.
+
+```python
+if sys.platform == "win32":
+    from _platform_win import (_cursor_pos, _any_key_pressed, ...)
+elif sys.platform == "darwin":
+    from _platform_mac import (_cursor_pos, _any_key_pressed, ...)
+```
+
+These **must** be imported as bare names (`from _platform_win import _cursor_pos`),
+never as a qualified `_plat.foo()` call. The 60+ test pytest suite does
+`monkeypatch.setattr(spg, "_cursor_pos", ...)` against `main.py`'s own module
+namespace — that only keeps working if the import binds the name directly
+into `main.py`'s globals, independent of which backend it came from. Do not
+"clean this up" into an indirection layer.
+
+`_platform_mac.py` is **written but unverified** — there is no Mac available
+to run it on. See its module docstring for the exact TCC-permission
+confidence levels and the verification checklist a human with real hardware
+must complete before it's trusted. `tests/conftest.py`'s `_load()` inserts
+the repo root onto `sys.path` before loading `main.py` by path, specifically
+so this sibling `import _platform_win`/`_platform_mac` resolves the same way
+it would if launched directly with `python main.py` — omitting that line
+reintroduces a `ModuleNotFoundError` that broke the entire test suite when
+this layer was first added.
+
+### Windows API calls (`_platform_win.py`)
 ```python
 ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED  # prevent sleep
 SendInput(MOUSEEVENTF_MOVE)    # _send_move — the ONLY way to reset the idle timer
@@ -211,11 +244,18 @@ self.start_btn, self.reg_btn, self.face_count_lbl, self.log_box
 ## Dependencies
 ```
 opencv-contrib-python   # cv2.face (LBPH) + cv2.data.haarcascades
-mediapipe>=0.10.0       # tasks.python.vision.FaceDetector
+mediapipe               # tasks.python.vision.FaceDetector
 customtkinter           # dark-theme GUI
 Pillow                  # image processing
 pystray                 # system tray icon
+pyobjc-core             # darwin only — _platform_mac.py's Quartz calls
+pyobjc-framework-Quartz # darwin only
 ```
+`requirements.txt` pins every version deliberately — unpinned, CI once
+installed `opencv-contrib-python 5.0.0`, which dropped the bundled Haar
+cascade XMLs and shipped a release with face detection dead. The two pyobjc
+lines are the one exception, left unpinned because there is no verified-
+working version to lock to from a machine with no Mac to test on.
 `numpy` is used directly but comes in transitively via opencv/mediapipe.
 
 ## Distribution
@@ -249,3 +289,9 @@ pystray                 # system tray icon
   Tests that drive the app with `update()` in a loop instead will see the worker die
   on `RuntimeError: main thread is not in main loop` — a test artifact, not a bug.
 - Settings tab lives in a `CTkScrollableFrame`; adding rows just extends the scroll
+- `_platform_mac.py` is unverified — no Mac was available while writing it. Do
+  not treat anything in it as confirmed-working; see its module docstring and
+  the "Platform backend" section above before touching or trusting it
+- There is no macOS build/CI yet (Phase 4 of the macOS port, gated on a human
+  confirming `_platform_mac.py` on real hardware first) — `build.ps1` and
+  `.github/workflows/build.yml` still produce a Windows-only release

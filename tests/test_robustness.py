@@ -112,7 +112,13 @@ def test_log_is_bounded(app, spg):
 
 
 def test_start_releases_camera_when_it_cannot_open(app, spg, monkeypatch):
-    """A failed open used to leak the VideoCapture and leave self.cap set."""
+    """A failed open used to leak the VideoCapture and leave self.cap set.
+
+    _start() tries the default backend, then explicitly retries with
+    CAP_DSHOW (a known real-world fix for a frozen build's default backend
+    failing to enumerate devices), so the mock must accept the extra
+    positional arg that second call passes and every attempt must release.
+    """
     released = []
 
     class Closed:
@@ -121,9 +127,37 @@ def test_start_releases_camera_when_it_cannot_open(app, spg, monkeypatch):
         def release(self):
             released.append(1)
 
-    monkeypatch.setattr(spg.cv2, "VideoCapture", lambda idx: Closed())
+    monkeypatch.setattr(spg.cv2, "VideoCapture", lambda idx, *a: Closed())
     app._start()
     assert app.running is False
     assert app.cap is None
-    assert released == [1]
+    assert released == [1, 1]
     assert "ERROR" in log_text(app)
+
+
+def test_start_falls_back_to_dshow(app, spg, monkeypatch):
+    """The default backend can fail to enumerate devices in a frozen build
+    even when the camera itself is fine; DSHOW is the working fallback."""
+    released = []
+
+    class Closed:
+        def isOpened(self):
+            return False
+        def release(self):
+            released.append("closed")
+
+    class Working:
+        def isOpened(self):
+            return True
+        def release(self):
+            released.append("working")
+
+    def fake_video_capture(idx, *backend):
+        return Working() if backend else Closed()
+
+    monkeypatch.setattr(spg.cv2, "VideoCapture", fake_video_capture)
+    app._start()
+    assert app.running is True
+    assert app.cap is not None
+    assert released == ["closed"], "the failed default-backend capture must be released"
+    assert "DSHOW" in log_text(app)

@@ -812,12 +812,25 @@ class App(ctk.CTk):
         (self._stop if self.running else self._start)()
 
     def _start(self):
+        # Default backend (CAP_ANY resolves to MSMF on Windows) is known to
+        # fail or hang enumerating devices specifically in PyInstaller-frozen
+        # builds -- it works fine running from source on the same machine.
+        # DSHOW is the older, more reliable backend for exactly that case.
         cap = cv2.VideoCapture(0)
+        backend = "default"
+        if not cap.isOpened():
+            cap.release()
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            backend = "DSHOW"
         if not cap.isOpened():
             cap.release()
             self.cap = None
-            self._log("ERROR: เปิดกล้องไม่ได้")
+            self._log("ERROR: เปิดกล้องไม่ได้ (ลองแล้วทั้ง default และ DSHOW)")
+            self._log("[warn] เช็คว่าแอปอื่นเปิดกล้องค้างอยู่ไหม, "
+                      "หรือปิดกล้องไว้ใน Settings > Privacy > Camera")
             return
+        if backend != "default":
+            self._log(f"[warn] เปิดกล้องด้วย default backend ไม่ได้ → ใช้ {backend} แทน")
         self.cap = cap
         self.running     = True
         self.screen_off  = False

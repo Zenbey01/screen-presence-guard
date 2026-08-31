@@ -12,6 +12,7 @@ version of these checks unreliable.
 """
 import importlib.util
 import os
+import sys
 import time
 
 import pytest
@@ -20,6 +21,15 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _load():
+    # main.py imports its platform backend as a plain sibling module
+    # (`import _platform_win`/`_platform_mac`), the same way it would if
+    # launched directly with `python main.py` -- in that case Python adds the
+    # script's own directory to sys.path[0] automatically. Loading main.py by
+    # path via spec_from_file_location does not get that for free, since
+    # sys.path[0] is this test process's own directory instead, so the
+    # sibling import fails unless REPO is put on sys.path here first.
+    if REPO not in sys.path:
+        sys.path.insert(0, REPO)
     spec = importlib.util.spec_from_file_location(
         "spg", os.path.join(REPO, "main.py"))
     mod = importlib.util.module_from_spec(spec)

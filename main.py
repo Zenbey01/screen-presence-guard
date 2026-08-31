@@ -2,7 +2,6 @@
 """Screen Presence Guard — keeps screen on when you're here, dark when you leave."""
 
 import cv2
-import ctypes
 import math
 import tkinter as tk
 import time
@@ -27,10 +26,6 @@ _cascade = cv2.CascadeClassifier(
 # the MediaPipe presence check behind it -- 30 identical log lines a second and
 # no detection at all. Never let it be load-bearing.
 _HAS_CASCADE = not _cascade.empty()
-
-ES_CONTINUOUS       = 0x80000000
-ES_SYSTEM_REQUIRED  = 0x00000001
-ES_DISPLAY_REQUIRED = 0x00000002
 
 _DIR            = os.path.dirname(os.path.abspath(__file__))
 FACE_SIZE       = (100, 100)
@@ -97,81 +92,24 @@ def _fmt_sec(v) -> str:
     return f"{v}s" if v < 60 else f"{v // 60}:{v % 60:02d}"
 
 
-class _POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-# SendInput plumbing. SetCursorPos moves the pointer but Windows does NOT
-# count it as user input, so it never resets the idle timer and cannot hold off
-# an enforced lock. Measured on Win11: after SetCursorPos the idle timer stayed
-# at 7125ms -> 7203ms; one SendInput dropped it to 78ms. Also note that
-# SetLastInputInfo (the old approach here) is documented but not exported by
-# user32 at all, so every _reset_idle() call used to raise AttributeError.
-INPUT_MOUSE      = 0
-MOUSEEVENTF_MOVE = 0x0001
-
-
-class _MOUSEINPUT(ctypes.Structure):
-    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
-                ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
-                ("time", ctypes.c_ulong),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-
-class _INPUT(ctypes.Structure):
-    class _U(ctypes.Union):
-        _fields_ = [("mi", _MOUSEINPUT)]
-    _anonymous_ = ("u",)
-    _fields_ = [("type", ctypes.c_ulong), ("u", _U)]
-
-
-def _send_move(dx: int, dy: int):
-    """Inject a relative mouse move. dx=dy=0 is a no-op move that still
-    registers as input, which is what actually resets the idle timer."""
-    inp = _INPUT(type=INPUT_MOUSE,
-                 mi=_MOUSEINPUT(dx, dy, 0, MOUSEEVENTF_MOVE, 0, None))
-    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
-
-
-def _any_key_pressed() -> bool:
-    """True if any key went down since the previous call.
-
-    Polled rather than bound: the overlay is overrideredirect(True), so Windows
-    never makes it the foreground window. While the user sits in another app,
-    their keystrokes go there and Tk's <KeyPress> binding never fires.
-    Range starts at 0x08 to skip the mouse buttons (0x01-0x06).
-    """
-    gaks = ctypes.windll.user32.GetAsyncKeyState
-    return any(gaks(vk) & 0x0001 for vk in range(0x08, 0xFF))
-
-
-class _LASTINPUTINFO(ctypes.Structure):
-    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong)]
-
-
-def _idle_ms() -> int:
-    """How long Windows thinks the machine has been idle.
-
-    GetLastInputInfo does exist (unlike SetLastInputInfo) and is the value a
-    standard enforced-lock policy watches. Logged around the jiggle so the user
-    can confirm the injection landed: the overlay hides the cursor, so a moving
-    pointer is impossible to observe while the screen is dark.
-    """
-    li = _LASTINPUTINFO()
-    li.cbSize = ctypes.sizeof(li)
-    ctypes.windll.user32.GetLastInputInfo(ctypes.byref(li))
-    return ctypes.windll.kernel32.GetTickCount() - li.dwTime
-
-
-def _reset_idle():
-    """Reset the Windows idle timer without moving the pointer."""
-    _send_move(0, 0)
-
-
-def _cursor_pos() -> tuple[int, int]:
-    pt = _POINT()
-    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-    return (pt.x, pt.y)
+# Platform-neutral primitives, imported as bare names so the test suite's
+# `monkeypatch.setattr(spg, "_cursor_pos", ...)` etc. keeps rebinding the name
+# in *this* module's namespace regardless of which backend it came from.
+# Do not change these to a qualified `_plat.foo()` form -- every call site
+# below relies on the bare name, and so does every existing test mock.
+if sys.platform == "win32":
+    from _platform_win import (
+        _cursor_pos, _any_key_pressed, _send_move, _reset_idle, _idle_ms,
+        _prevent_sleep, _overlay_bounds, _set_cursor_pos,
+    )
+elif sys.platform == "darwin":
+    from _platform_mac import (
+        _cursor_pos, _any_key_pressed, _send_move, _reset_idle, _idle_ms,
+        _prevent_sleep, _overlay_bounds, _set_cursor_pos,
+    )
+else:
+    raise RuntimeError(
+        f"Screen Presence Guard has no platform backend for {sys.platform!r}")
 
 
 def _detect_boxes(frame) -> list:
@@ -195,10 +133,7 @@ class _BlackOverlay(tk.Toplevel):
         super().__init__(master, bg="black", cursor="none")
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        x = ctypes.windll.user32.GetSystemMetrics(76)
-        y = ctypes.windll.user32.GetSystemMetrics(77)
-        w = ctypes.windll.user32.GetSystemMetrics(78)
-        h = ctypes.windll.user32.GetSystemMetrics(79)
+        x, y, w, h = _overlay_bounds()
         self.geometry(f"{w}x{h}+{x}+{y}")
         def wake(t, var=None):
             if master._jiggling:
@@ -899,7 +834,7 @@ class App(ctk.CTk):
             self._overlay.destroy()
             self._overlay = None
         self.screen_off = False
-        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+        _prevent_sleep("allow")
         if self.cap:
             self.cap.release()
             self.cap = None
@@ -1004,8 +939,7 @@ class App(ctk.CTk):
                 self._wake("ใบหน้า" if face_detected else
                            "เมาส์"  if mouse_moved   else "คีย์บอร์ด")
             else:
-                ctypes.windll.kernel32.SetThreadExecutionState(
-                    ES_CONTINUOUS | ES_DISPLAY_REQUIRED)
+                _prevent_sleep("display")
             label = ("พบใบหน้า"        if face_detected else
                      "พบการเคลื่อนไหว" if mouse_moved   else "พบการพิมพ์")
             self.status_dot.configure(text_color=C_ON)
@@ -1027,8 +961,7 @@ class App(ctk.CTk):
                 self._sleep()
             else:
                 _reset_idle()
-                ctypes.windll.kernel32.SetThreadExecutionState(
-                    ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
+                _prevent_sleep("system")
                 self._heartbeat += 1
                 ticks = max(1, int(60 / self.interval.get()))
                 if self._heartbeat % ticks == 0:
@@ -1087,7 +1020,7 @@ class App(ctk.CTk):
             _send_move(tx - cx, ty - cy)
             cx, cy = tx, ty
             time.sleep(0.03)
-        ctypes.windll.user32.SetCursorPos(x, y)
+        _set_cursor_pos(x, y)
         time.sleep(0.03)
 
     def _sched(self, attr_id, attr_var, attr_sec, callback, label):
@@ -1182,8 +1115,7 @@ class App(ctk.CTk):
         if self._overlay:
             self._overlay.destroy()
             self._overlay = None
-        ctypes.windll.kernel32.SetThreadExecutionState(
-            ES_CONTINUOUS | ES_DISPLAY_REQUIRED)
+        _prevent_sleep("display")
         self._mouse_pos = _cursor_pos()
         self.screen_off = False
         self._heartbeat = 0
@@ -1236,7 +1168,7 @@ class App(ctk.CTk):
                 pass
             self._overlay = None
         self.screen_off = False
-        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+        _prevent_sleep("allow")
 
         # Release camera + tray in background so UI doesn't freeze
         cap  = self.cap

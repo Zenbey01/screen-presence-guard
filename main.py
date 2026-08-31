@@ -106,6 +106,7 @@ elif sys.platform == "darwin":
     from _platform_mac import (
         _cursor_pos, _any_key_pressed, _send_move, _reset_idle, _idle_ms,
         _prevent_sleep, _overlay_bounds, _set_cursor_pos,
+        _accessibility_trusted,
     )
 else:
     raise RuntimeError(
@@ -751,21 +752,27 @@ class App(ctk.CTk):
         # fail or hang enumerating devices specifically in PyInstaller-frozen
         # builds -- it works fine running from source on the same machine.
         # DSHOW is the older, more reliable backend for exactly that case.
+        # macOS's default backend is AVFoundation, which has no equivalent
+        # documented failure mode, so the retry is Windows-only.
         cap = cv2.VideoCapture(0)
         backend = "default"
-        if not cap.isOpened():
+        if not cap.isOpened() and sys.platform == "win32":
             cap.release()
             cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
             backend = "DSHOW"
         if not cap.isOpened():
             cap.release()
             self.cap = None
-            self._log("ERROR: เปิดกล้องไม่ได้ (ลองแล้วทั้ง default และ DSHOW)")
+            tried = "ลองแล้วทั้ง default และ DSHOW" if sys.platform == "win32" else "default"
+            self._log(f"ERROR: เปิดกล้องไม่ได้ ({tried})")
             self._log("[warn] เช็คว่าแอปอื่นเปิดกล้องค้างอยู่ไหม, "
                       "หรือปิดกล้องไว้ใน Settings > Privacy > Camera")
             return
         if backend != "default":
             self._log(f"[warn] เปิดกล้องด้วย default backend ไม่ได้ → ใช้ {backend} แทน")
+        if sys.platform == "darwin" and not _accessibility_trusted():
+            self._log("[warn] ยังไม่ได้ให้สิทธิ์ Accessibility → เมาส์ jiggle จะไม่ทำงาน")
+            self._log("[warn] เปิดได้ที่ System Settings > Privacy & Security > Accessibility")
         self.cap = cap
         self.running     = True
         self.screen_off  = False

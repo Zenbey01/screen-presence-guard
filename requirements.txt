@@ -7,3 +7,11 @@ mediapipe==0.10.35
 customtkinter==5.2.2
 Pillow==12.2.0
 pystray==0.19.5
+
+# macOS-only backend for _platform_mac.py (Quartz/CoreGraphics event APIs).
+# Deliberately unpinned: this was written and last touched from a Windows
+# machine with no way to pip install or run these, so there is no verified
+# version to lock to yet. Pin these the same way the block above got pinned
+# -- after a real macOS install and test run -- not before.
+pyobjc-core; sys_platform == "darwin"
+pyobjc-framework-Quartz; sys_platform == "darwin"
